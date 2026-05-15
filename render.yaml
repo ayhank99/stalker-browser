@@ -2,7 +2,7 @@ services:
   - type: web
     name: stalker-browser
     runtime: docker
-    plan: starter
+    plan: free
     dockerfilePath: ./Dockerfile
     envVars:
       - key: NODE_ENV
@@ -11,7 +11,3 @@ services:
         value: /app/data
       - key: XTREAM_PORT
         value: 3000
-    disk:
-      name: app-data
-      mountPath: /app/data
-      sizeGB: 1
