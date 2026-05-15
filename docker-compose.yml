@@ -1,0 +1,15 @@
+services:
+  iptv-manager:
+    build:
+      context: .
+    container_name: iptv-manager
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "8080:8080"
+    environment:
+      PORT: "3000"
+      XTREAM_PORT: "8080"
+      DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data

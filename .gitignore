@@ -1,0 +1,33 @@
+cl.env
+.env
+.env.local
+node_modules
+
+.vercel
+.env*.local
+.vercel-env-check
+data/playlists.json
+data/server-config.json
+
+# Python (YouTube proxy)
+.venv/
+.venv-*/
+__pycache__/
+*.pyc
+
+# HLS runtime output — binary transport stream segments, never commit
+public/hls/
+
+# Local run artifacts
+.tmp-server.*
+perf*-server*.log
+*.err.log
+*.out.log
+*.pid
+
+# Desktop build artifacts
+desktop/node_modules/
+desktop/dist/
+android-tv/.gradle
+android-tv/build
+android-tv/app/build

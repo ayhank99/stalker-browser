@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPTV Kontrol Panel</title>
+<link rel="stylesheet" href="/assets/app-shell.css">
+</head>
+<body>
+<div class="app-shell">
+  <div class="topbar">
+    <div class="brand">IPTV <span>Workspace</span></div>
+    <div class="nav-links">
+      <a class="nav-link" data-nav="dashboard" href="/">Dashboard</a>
+      <a class="nav-link" data-nav="control" href="/control-panel.html">Kontrol Panel</a>
+      <a class="nav-link" data-nav="channels" href="/channels.html">Kanallar</a>
+      <a class="nav-link" data-nav="editor" href="/editor.html">Editor</a>
+      <a class="nav-link" data-nav="server" href="/tv-server.html">TV Sunucu</a>
+    </div>
+    <div class="topbar-right">
+      <span class="server-badge" id="server-badge">Sunucu Aktif</span>
+    </div>
+  </div>
+
+  <div class="progress-wrap"><div class="progress-fill" id="pbar"></div></div>
+
+  <div class="page">
+    <div class="page-stack">
+      <div class="card">
+        <div class="card-title"><span class="icon-badge ic-dashboard">K</span>Kontrol Panel</div>
+        <div class="section-copy">Kaynaklar artik ayri moduldedir. Bu sayfada liste ekleme, yenileme, silme, bitis tarihi takibi ve otomatik sync periyotlari bulunur.</div>
+      </div>
+
+      <section class="control-grid">
+        <div class="card">
+          <div class="card-title"><span class="icon-badge ic-stalker">S</span>Stalker Portal Ekle</div>
+          <div class="section-copy">Portal baglantisini test eder, token alir ve kanal listesini kategori bazli indirir.</div>
+          <div class="form-grid-2">
+            <div class="field"><label>Portal URL</label><input type="url" id="s-url" placeholder="http://portal.example.com/c"></div>
+            <div class="field"><label>MAC Adresi</label><input type="text" id="s-mac" placeholder="00:1A:79:XX:XX:XX"></div>
+          </div>
+          <div class="field" style="margin-bottom:14px"><label>Liste Adi</label><input type="text" id="s-name" placeholder="Benim Stalker Listem"></div>
+          <div class="btn-row"><button class="btn btn-primary" type="button" id="btn-add-stalker">Baglan ve Indir</button><span class="inline-status" id="s-status"></span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span class="icon-badge ic-xtream">X</span>Xtream Codes Ekle</div>
+          <div class="section-copy">Kullanici bilgileriyle kategori ve stream listelerini cekip yerel koleksiyona ekler.</div>
+          <div class="form-grid-3">
+            <div class="field"><label>Sunucu URL</label><input type="url" id="x-host" placeholder="http://server.com:8080"></div>
+            <div class="field"><label>Kullanici Adi</label><input type="text" id="x-user" placeholder="username"></div>
+            <div class="field"><label>Sifre</label><input type="password" id="x-pass" placeholder="password"></div>
+          </div>
+          <div class="field" style="margin-bottom:14px"><label>Liste Adi</label><input type="text" id="x-name" placeholder="Benim Xtream Listem"></div>
+          <div class="btn-row"><button class="btn btn-primary" type="button" id="btn-add-xtream">Baglan ve Indir</button><span class="inline-status" id="x-status"></span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span class="icon-badge ic-m3u">M</span>M3U Dosyasi veya URL Ekle</div>
+          <div class="section-copy">URL veya dosya ile gelen M3U icerigini parse eder, canli yayin, film ve dizi olarak ayirir.</div>
+          <div class="form-grid-2">
+            <div class="field"><label>M3U URL</label><input type="url" id="m-url" placeholder="http://example.com/list.m3u"></div>
+            <div class="field"><label>M3U Dosya</label><input type="file" id="m-file" accept=".m3u,.m3u8,text/plain"></div>
+          </div>
+          <div class="field" style="margin-bottom:14px"><label>Liste Adi</label><input type="text" id="m-name" placeholder="Benim M3U Listem"></div>
+          <div class="btn-row"><button class="btn btn-primary" type="button" id="btn-add-m3u">Iceri Aktar</button><span class="inline-status" id="m-status"></span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span class="icon-badge ic-external">E</span>Harici Video Kaydi</div>
+          <div class="section-copy">Kendi sahip oldugun veya kullanma hakkin olan MP4 / M3U8 / dogrudan video linklerini veritabanina kaynak liste olarak kaydeder. Editor sihirbazi bu kaynagi da Stalker ve Xtream ile birlikte kullanir.</div>
+          <div class="form-grid-3">
+            <div class="field"><label>Playlist Adi</label><input type="text" id="e-name" placeholder="Harici Video Kutuphanem"></div>
+            <div class="field"><label>Icerik Tipi</label><select id="e-kind"><option value="live">Live TV</option><option value="movies" selected>Movies</option><option value="series">Series</option></select></div>
+            <div class="field"><label>Kategori</label><input type="text" id="e-group" placeholder="Belgesel"></div>
+          </div>
+          <div class="form-grid-2">
+            <div class="field"><label>Video Adi</label><input type="text" id="e-item-name" placeholder="Ornek Video"></div>
+            <div class="field"><label>Kaynak Etiketi</label><input type="text" id="e-provider" placeholder="Kendi Arsivim"></div>
+          </div>
+          <div class="form-grid-2">
+            <div class="field"><label>Stream URL</label><input type="url" id="e-url" placeholder="https://cdn.example.com/video.m3u8"></div>
+            <div class="field"><label>Logo URL</label><input type="url" id="e-logo" placeholder="https://cdn.example.com/poster.jpg"></div>
+          </div>
+          <div class="btn-row"><button class="btn btn-primary" type="button" id="btn-add-external">Veritabanina Kaydet</button><span class="inline-status" id="e-status"></span></div>
+        </div>
+      </section>
+
+      <div class="card">
+        <div class="card-title">Hizli Durum</div>
+        <div class="stats-grid">
+          <div class="stat-card"><div class="stat-big" id="quick-live">0</div><div class="stat-label">Canli Kanal</div></div>
+          <div class="stat-card"><div class="stat-big" id="quick-movies">0</div><div class="stat-label">Film</div></div>
+          <div class="stat-card"><div class="stat-big" id="quick-series">0</div><div class="stat-label">Dizi</div></div>
+          <div class="stat-card"><div class="stat-big" id="quick-lists">0</div><div class="stat-label">Liste</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Kayitli Listeler</div>
+        <div class="source-list" id="source-list">
+          <div class="empty">Yukleniyor...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span id="status-left">Hazir</span>
+    <span id="status-right" class="status-right"></span>
+  </div>
+</div>
+<script type="module" src="/assets/control-panel.js"></script>
+</body>
+</html>

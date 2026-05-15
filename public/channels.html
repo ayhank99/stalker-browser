@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPTV Kanallar</title>
+<link rel="stylesheet" href="/assets/app-shell.css">
+</head>
+<body>
+<div class="app-shell">
+  <div class="topbar">
+    <div class="brand">IPTV <span>Workspace</span></div>
+    <div class="nav-links">
+      <a class="nav-link" data-nav="dashboard" href="/">Dashboard</a>
+      <a class="nav-link" data-nav="control" href="/control-panel.html">Kontrol Panel</a>
+      <a class="nav-link" data-nav="channels" href="/channels.html">Kanallar</a>
+      <a class="nav-link" data-nav="editor" href="/editor.html">Editor</a>
+      <a class="nav-link" data-nav="server" href="/tv-server.html">TV Sunucu</a>
+    </div>
+    <div class="topbar-right">
+      <span class="server-badge" id="server-badge">Sunucu Aktif</span>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="page-stack">
+      <div class="card">
+        <div class="card-title"><span class="icon-badge ic-dashboard">C</span>Kanal Modulu</div>
+        <div class="section-copy">Kanal tarama, arama, oynatma ve URL kopyalama bu ayri modulde toplanir.</div>
+      </div>
+
+      <div class="channels-layout">
+        <aside class="sidebar">
+          <div class="sidebar-pad">
+            <div class="sidebar-label">Ana Kategori</div>
+            <button class="cat-btn active" type="button" id="btn-live"><span class="cat-dot d-live"></span>Live TV<span class="cat-cnt" id="cnt-live">0</span></button>
+            <button class="cat-btn" type="button" id="btn-movies"><span class="cat-dot d-movies"></span>Movies<span class="cat-cnt" id="cnt-movies">0</span></button>
+            <button class="cat-btn" type="button" id="btn-series"><span class="cat-dot d-series"></span>Series<span class="cat-cnt" id="cnt-series">0</span></button>
+          </div>
+          <div class="sidebar-pad">
+            <div class="sidebar-label">Kaynak</div>
+            <select id="source-filter"><option value="__all__">Tum Listeler</option></select>
+          </div>
+          <div class="sidebar-pad" style="padding-top:0; flex:1;">
+            <div class="sidebar-label">Alt Kategori</div>
+            <div class="sub-scroll" id="subcat-list"></div>
+          </div>
+        </aside>
+
+        <section class="content-pane">
+          <div class="content-head">
+            <div class="content-title" id="ch-title">Kanal tarayicisi</div>
+            <input class="search-input" type="text" id="search-box" placeholder="Kanal ara...">
+            <button class="btn btn-gray btn-sm" type="button" id="btn-export-m3u">M3U indir</button>
+            <button class="btn btn-gray btn-sm" type="button" id="btn-copy-all">URL Listesi</button>
+          </div>
+          <div class="ch-list" id="ch-list">
+            <div class="empty">Yukleniyor...</div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span id="status-left">Hazir</span>
+    <span id="status-right" class="status-right"></span>
+  </div>
+</div>
+<script type="module" src="/assets/channels.js"></script>
+</body>
+</html>

@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube Proxy Kanallar</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f0f0f; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; padding: 20px; min-height: 100vh; }
+  h1 { color: #fff; font-size: 1.4rem; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+  h1 svg { width: 28px; height: 28px; }
+  .add-box { background: #1a1a1a; border: 1px solid #333; border-radius: 10px; padding: 18px; margin-bottom: 24px; }
+  .add-box h2 { font-size: 1rem; color: #aaa; margin-bottom: 12px; }
+  .input-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  input[type=text] { flex: 1; min-width: 200px; background: #111; border: 1px solid #444; color: #fff; padding: 9px 12px; border-radius: 6px; font-size: 0.95rem; outline: none; }
+  input[type=text]:focus { border-color: #f00; }
+  button { background: #cc0000; color: #fff; border: none; padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 0.9rem; font-weight: 600; transition: background 0.2s; white-space: nowrap; }
+  button:hover { background: #e00; }
+  button.secondary { background: #333; }
+  button.secondary:hover { background: #555; }
+  button.danger { background: #8b0000; }
+  button.danger:hover { background: #b00; }
+  .status { margin-top: 10px; font-size: 0.85rem; min-height: 18px; color: #4caf50; }
+  .status.error { color: #f87171; }
+  .channels-list { display: flex; flex-direction: column; gap: 12px; }
+  .channel-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 14px 16px; }
+  .channel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .channel-title { font-weight: 700; font-size: 1rem; color: #fff; word-break: break-all; }
+  .channel-meta { font-size: 0.78rem; color: #666; margin-top: 3px; }
+  .proxy-url-row { display: flex; gap: 6px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+  .proxy-url { flex: 1; background: #111; border: 1px solid #333; border-radius: 5px; padding: 7px 10px; font-size: 0.82rem; color: #60a5fa; font-family: monospace; word-break: break-all; user-select: all; }
+  .badge { font-size: 0.72rem; background: #222; color: #888; border: 1px solid #333; border-radius: 12px; padding: 2px 8px; white-space: nowrap; }
+  .empty { color: #555; text-align: center; padding: 40px; font-size: 0.95rem; }
+  .m3u-box { margin-top: 10px; }
+  .m3u-content { background: #111; border: 1px solid #333; border-radius: 5px; padding: 8px 10px; font-size: 0.78rem; color: #a78bfa; font-family: monospace; white-space: pre; overflow-x: auto; }
+  .top-actions { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+  .count-badge { color: #666; font-size: 0.85rem; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #444; border-top-color: #f00; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<h1>
+  <svg viewBox="0 0 24 24" fill="#ff0000"><path d="M23.5 6.19a3 3 0 0 0-2.11-2.12C19.54 3.5 12 3.5 12 3.5s-7.54 0-9.39.57A3 3 0 0 0 .5 6.19C0 8.04 0 12 0 12s0 3.96.5 5.81a3 3 0 0 0 2.11 2.12C4.46 20.5 12 20.5 12 20.5s7.54 0 9.39-.57a3 3 0 0 0 2.11-2.12C24 15.96 24 12 24 12s0-3.96-.5-5.81z"/><polygon fill="#fff" points="9.75,15.02 15.5,12 9.75,8.98 9.75,15.02"/></svg>
+  YouTube Proxy Kanallar
+</h1>
+
+<div class="add-box">
+  <h2>Yeni YouTube Linki Ekle</h2>
+  <div class="input-row">
+    <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=... veya youtu.be/..." />
+    <input type="text" id="titleInput" placeholder="Kanal adı (isteğe bağlı)" style="max-width:220px" />
+    <button onclick="addChannel()">Ekle &amp; Proxy Oluştur</button>
+  </div>
+  <div class="status" id="addStatus"></div>
+</div>
+
+<div class="top-actions">
+  <span class="count-badge" id="countBadge">Yükleniyor...</span>
+  <button class="secondary" onclick="downloadM3U()">M3U Playlist İndir</button>
+  <button class="secondary" onclick="loadChannels()">Yenile</button>
+</div>
+
+<div class="channels-list" id="channelsList">
+  <div class="empty">Yükleniyor... <span class="spinner"></span></div>
+</div>
+
+<script>
+const BASE = window.location.origin;
+
+async function loadChannels() {
+  try {
+    const r = await fetch('/api/yt-channels');
+    const data = await r.json();
+    renderChannels(data.channels || []);
+  } catch (e) {
+    document.getElementById('channelsList').innerHTML = '<div class="empty" style="color:#f87171">Yükleme hatası: ' + e.message + '</div>';
+  }
+}
+
+function renderChannels(channels) {
+  const list = document.getElementById('channelsList');
+  document.getElementById('countBadge').textContent = channels.length + ' kanal';
+  if (!channels.length) {
+    list.innerHTML = '<div class="empty">Henüz kanal eklenmedi. Yukarıdan bir YouTube linki ekleyin.</div>';
+    return;
+  }
+  list.innerHTML = channels.map(ch => {
+    const proxyUrl = BASE + '/proxy/' + ch.id;
+    const m3uLine = '#EXTINF:-1 tvg-id="yt-' + ch.id + '" group-title="YouTube Proxy",' + (ch.title || ch.url) + '\n' + proxyUrl;
+    const date = ch.createdAt ? new Date(ch.createdAt).toLocaleString('tr-TR') : '';
+    return `
+      <div class="channel-card">
+        <div class="channel-header">
+          <div>
+            <div class="channel-title">${esc(ch.title || ch.url)}</div>
+            <div class="channel-meta">
+              <span class="badge">ID: ${esc(ch.id)}</span>&nbsp;
+              <span class="badge">videoId: ${esc(ch.videoId)}</span>
+              ${date ? '&nbsp;<span class="badge">' + esc(date) + '</span>' : ''}
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <button class="secondary" onclick="testProxy('${esc(ch.id)}')">Test</button>
+            <button class="danger" onclick="deleteChannel('${esc(ch.id)}')">Sil</button>
+          </div>
+        </div>
+        <div class="proxy-url-row">
+          <div class="proxy-url">${esc(proxyUrl)}</div>
+          <button class="secondary" onclick="copyText('${esc(proxyUrl)}', this)">Kopyala</button>
+        </div>
+        <div class="m3u-box">
+          <div class="m3u-content">${esc(m3uLine)}</div>
+          <button class="secondary" style="margin-top:5px;font-size:0.78rem;padding:5px 10px" onclick="copyText(${JSON.stringify(m3uLine)}, this)">M3U Satırını Kopyala</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function addChannel() {
+  const url = document.getElementById('urlInput').value.trim();
+  const title = document.getElementById('titleInput').value.trim();
+  const status = document.getElementById('addStatus');
+  if (!url) { status.className = 'status error'; status.textContent = 'YouTube linki gerekli!'; return; }
+  status.className = 'status'; status.innerHTML = 'Ekleniyor... <span class="spinner"></span>';
+  try {
+    const r = await fetch('/api/yt-channels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, title })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    status.className = 'status';
+    status.innerHTML = '✓ Eklendi! Proxy URL: <strong>' + esc(BASE + '/proxy/' + data.id) + '</strong>';
+    document.getElementById('urlInput').value = '';
+    document.getElementById('titleInput').value = '';
+    loadChannels();
+  } catch (e) {
+    status.className = 'status error';
+    status.textContent = 'Hata: ' + e.message;
+  }
+}
+
+async function deleteChannel(id) {
+  if (!confirm('Bu kanalı silmek istiyor musunuz?')) return;
+  try {
+    await fetch('/api/yt-channels/' + encodeURIComponent(id), { method: 'DELETE' });
+    loadChannels();
+  } catch (e) { alert('Silme hatası: ' + e.message); }
+}
+
+function testProxy(id) {
+  window.open(BASE + '/proxy/' + id, '_blank');
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Kopyalandı';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+}
+
+async function downloadM3U() {
+  try {
+    const r = await fetch('/api/yt-channels');
+    const data = await r.json();
+    const channels = data.channels || [];
+    if (!channels.length) { alert('Kanal yok.'); return; }
+    let m3u = '#EXTM3U\n';
+    channels.forEach(ch => {
+      m3u += '#EXTINF:-1 tvg-id="yt-' + ch.id + '" group-title="YouTube Proxy",' + (ch.title || ch.url) + '\n';
+      m3u += BASE + '/proxy/' + ch.id + '\n';
+    });
+    const blob = new Blob([m3u], { type: 'application/x-mpegurl' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'yt-channels.m3u';
+    a.click();
+  } catch (e) { alert('Hata: ' + e.message); }
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+document.getElementById('urlInput').addEventListener('keydown', e => { if (e.key === 'Enter') addChannel(); });
+
+loadChannels();
+</script>
+</body>
+</html>

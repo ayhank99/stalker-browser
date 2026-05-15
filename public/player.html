@@ -1,0 +1,1234 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPTV Player</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; background: #000; }
+body { font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; color: #fff; }
+.player-container { position: fixed; inset: 0; display: flex; flex-direction: column; background: #000; }
+.player-top { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: rgba(9, 18, 34, 0.96); border-bottom: 1px solid rgba(63, 109, 167, 0.28); }
+.player-title { font-weight: 800; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.player-close-btn { border: 1px solid rgba(63, 109, 167, 0.35); border-radius: 10px; padding: 8px 12px; background: transparent; color: #fff; cursor: pointer; font-weight: 800; }
+.player-close-btn:hover { background: rgba(255, 107, 107, 0.12); border-color: rgba(255, 107, 107, 0.35); }
+.player-video { flex: 1; width: 100%; background: #000; min-height: 0; }
+.player-info { padding: 8px 16px; background: #091120; color: #9eecc0; font-size: 11px; font-family: Consolas, "Courier New", monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+<div class="player-container">
+  <div class="player-top">
+    <div class="player-title" id="player-title">IPTV Player</div>
+    <button class="player-close-btn" type="button" onclick="requestClose()">Kapat</button>
+  </div>
+  <video id="player-video" class="player-video" controls autoplay preload="none" crossorigin="anonymous"></video>
+  <div id="kelo-yt-wrapper" style="display:none;flex:1;width:100%;min-height:0;background:#000;"></div>
+  <div class="player-info" id="player-info">Hazir...</div>
+</div>
+<img id="kelo-overlay" src="/assets/kelo-logo-animated.svg" alt="" style="position:fixed;top:28px;right:34px;width:clamp(70px,6vw,128px);pointer-events:none;z-index:999999;display:none;filter:drop-shadow(0 0 12px rgba(0,217,255,.4))" />
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"></script>
+<script>
+var API_BASE = window.location.origin;
+var video = document.getElementById('player-video');
+var hlsInst = null;
+var mpegtsInst = null;
+var loadTimeoutId = null;
+var stallMonitorId = null;
+var reconnectTimerId = null;
+var playbackReady = false;
+var currentRequestId = 0;
+var compatibilityFallbackActive = false;
+var sourceUrl = '';
+var sourceHeaders = {};
+var sourceMac = '';
+var sourceName = 'IPTV Stream';
+var sourceType = '';
+var sourcePortalUrl = '';
+var sourceResolveCmd = '';
+var sourceItemId = '';
+var sourceContentKind = 'live';
+var initialPreferCompat = false;
+var activePlaybackKind = '';
+var activeForceCompat = false;
+var lastProgressAt = 0;
+var lastObservedTime = 0;
+var stallRecoveryPending = false;
+var userClosing = false;
+
+function setInfo(text) {
+  document.getElementById('player-info').textContent = text;
+}
+
+function requestClose() {
+  userClosing = true;
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage({ type: 'close-player' }, window.location.origin);
+    return;
+  }
+
+  try {
+    window.close();
+  } catch (error) {
+  }
+
+  if (window.history.length > 1) {
+    window.history.back();
+  }
+}
+
+function getUrlParam(name) {
+  var params = new URLSearchParams(window.location.search);
+  return params.get(name) || '';
+}
+
+function getExtensionFromUrl(url) {
+  try {
+    var pathname = new URL(url).pathname;
+    var match = pathname.match(/\.([a-z0-9]+)$/i);
+    return match ? match[1].toLowerCase() : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function inferStreamKind(url, contentType) {
+  var ct = String(contentType || '').toLowerCase();
+  var ext = getExtensionFromUrl(url);
+
+  if (ct.indexOf('application/vnd.apple.mpegurl') !== -1 || ct.indexOf('application/x-mpegurl') !== -1 || ext === 'm3u8' || ext === 'm3u') {
+    return 'hls';
+  }
+  if (
+    ct.indexOf('video/mp2t') !== -1 ||
+    ct.indexOf('application/mp2t') !== -1 ||
+    ['mpegts', 'm2ts', 'mts', 'mpg', 'mpeg', 'ts'].indexOf(ext) !== -1 ||
+    /\/play\/live\.php/i.test(String(url || '')) ||
+    /\/live\/play\//i.test(String(url || ''))
+  ) {
+    return 'mpegts';
+  }
+  if (ct.indexOf('application/dash+xml') !== -1 || ext === 'mpd') {
+    return 'dash';
+  }
+  if (ct.indexOf('audio/') === 0 || ['aac', 'flac', 'm4a', 'mp3', 'oga', 'ogg', 'wav'].indexOf(ext) !== -1) {
+    return 'audio';
+  }
+  if (ct.indexOf('video/') === 0 || ['avi', 'flv', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg4', 'webm'].indexOf(ext) !== -1) {
+    return 'video';
+  }
+  return 'unknown';
+}
+
+function getMimeType(url, contentType, kind) {
+  var ct = String(contentType || '').trim();
+  var ext;
+
+  if (ct) return ct;
+  if (kind === 'hls') return 'application/x-mpegURL';
+  if (kind === 'mpegts') return 'video/mp2t';
+  if (kind === 'dash') return 'application/dash+xml';
+  if (kind === 'audio') return 'audio/mpeg';
+  if (kind === 'video') {
+    ext = getExtensionFromUrl(url);
+    if (ext === 'webm') return 'video/webm';
+    if (ext === 'mkv') return 'video/x-matroska';
+    return 'video/mp4';
+  }
+  return 'video/mp4';
+}
+
+function isTailscaleHlsUrl(url) {
+  try {
+    var parsed = new URL(url);
+    return parsed.hostname.toLowerCase().endsWith('.ts.net') &&
+      /\.m3u8(?:[?#]|$)/i.test(parsed.pathname + parsed.search);
+  } catch (error) {
+    return false;
+  }
+}
+
+function buildHlsProxyUrl(url) {
+  var proxyUrl = new URL('/api/hls-proxy', API_BASE + '/');
+  proxyUrl.searchParams.set('url', url);
+  return proxyUrl.toString();
+}
+
+function normalizeHeaders(headers) {
+  var normalized = {};
+  Object.keys(headers || {}).forEach(function(key) {
+    var value = String(headers[key] || '').trim();
+    if (key && value) {
+      normalized[key] = value;
+    }
+  });
+  return normalized;
+}
+
+function isDirectTokenizedStalkerStreamUrl(url) {
+  try {
+    var parsedUrl = new URL(url);
+    var normalizedPath = parsedUrl.pathname.toLowerCase();
+    var hasPlayToken = parsedUrl.searchParams.has('play_token');
+    var hasMac = parsedUrl.searchParams.has('mac');
+    var hasStream = parsedUrl.searchParams.has('stream');
+    var extension = String(parsedUrl.searchParams.get('extension') || '').toLowerCase();
+
+    return normalizedPath.endsWith('/play/live.php') &&
+      (hasPlayToken || (hasMac && hasStream)) &&
+      (!extension || extension === 'ts');
+  } catch (error) {
+    return false;
+  }
+}
+
+function isStalkerLiveRequest(headers) {
+  var userAgent = String(headers['User-Agent'] || headers['user-agent'] || '').trim().toLowerCase();
+  var xUserAgent = String(headers['X-User-Agent'] || headers['x-user-agent'] || '').trim().toLowerCase();
+  var icyMetaData = String(headers['Icy-MetaData'] || headers['icy-metadata'] || '').trim();
+  var cookie = String(headers['Cookie'] || headers['cookie'] || '').trim().toLowerCase();
+  var serialNumber = String(headers['SN'] || headers['sn'] || '').trim();
+  var authorization = String(headers['Authorization'] || headers['authorization'] || '').trim();
+
+  return icyMetaData === '1' ||
+    userAgent === 'ksplayer' ||
+    xUserAgent.indexOf('mag250') !== -1 ||
+    (cookie.indexOf('mac=') !== -1 && (Boolean(serialNumber) || Boolean(authorization)));
+}
+
+function shouldResolveStalkerCommand(cmd) {
+  var value = String(cmd || '').trim();
+  return !value || /^(?:ffmpeg|ffrt|auto|mpegts)\s+/i.test(value) || value.indexOf('localhost') !== -1 || value.indexOf('127.0.0.1') !== -1 || value.indexOf('/ch/') !== -1 || value.charAt(0) === '/';
+}
+
+function shouldPreferCompatibility(url, headers) {
+  var lowerUrl = String(url || '').toLowerCase();
+  var normalizedHeaders = normalizeHeaders(headers || {});
+  if (isDirectTokenizedStalkerStreamUrl(url)) {
+    return false;
+  }
+  return /\/live\/play\//i.test(lowerUrl);
+}
+
+function canUseCompatibilityFallback(url, headers) {
+  if (isDirectTokenizedStalkerStreamUrl(url)) {
+    return false;
+  }
+  return shouldPreferCompatibility(url, headers);
+}
+
+function buildStreamUrl(path, url, headers, mac) {
+  var target = new URL(path, API_BASE + '/');
+  target.searchParams.set('url', url);
+
+  if (mac) {
+    target.searchParams.set('mac', mac);
+  }
+
+  var normalizedHeaders = normalizeHeaders(headers || {});
+  if (Object.keys(normalizedHeaders).length) {
+    target.searchParams.set('headers', JSON.stringify(normalizedHeaders));
+  }
+
+  return target.toString();
+}
+
+function resolveExistingProxyRequest(url) {
+  try {
+    var parsedUrl = new URL(url);
+    var normalizedPath = parsedUrl.pathname.replace(/\/+$/, '');
+    if (parsedUrl.origin !== window.location.origin) {
+      return null;
+    }
+    if (/^\/proxy\/yt_[A-Za-z0-9_-]{11}$/.test(normalizedPath)) {
+      return {
+        requestedUrl: url,
+        sourceUrl: url,
+        resolvedUrl: url,
+        kind: 'hls',
+        mimeType: 'application/x-mpegURL'
+      };
+    }
+    if (normalizedPath !== '/stream' && normalizedPath !== '/stream/compat') {
+      return null;
+    }
+
+    var innerUrl = String(parsedUrl.searchParams.get('url') || '').trim() || url;
+    var kind = normalizedPath === '/stream/compat' ? 'mpegts' : inferStreamKind(innerUrl, '');
+    return {
+      requestedUrl: url,
+      sourceUrl: innerUrl,
+      resolvedUrl: url,
+      kind: kind,
+      mimeType: normalizedPath === '/stream/compat' ? 'video/mp2t' : getMimeType(innerUrl, '', kind)
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+function requestJson(url, init) {
+  return fetch(url, init).then(function(response) {
+    return response.text().then(function(text) {
+      var data = {};
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch (error) {
+          throw new Error(text.slice(0, 200));
+        }
+      }
+      if (!response.ok) {
+        var message = data.error || ('HTTP ' + response.status);
+        if (data.details) {
+          message += ' | ' + data.details;
+        }
+        throw new Error(message);
+      }
+      return data;
+    });
+  });
+}
+
+function resolveFreshSourceRequest() {
+  var needsResolve = sourceType === 'stalker' &&
+    sourcePortalUrl &&
+    sourceMac &&
+    (sourceResolveCmd || (sourceContentKind === 'series' && sourceItemId)) &&
+    (sourceContentKind !== 'live' || shouldResolveStalkerCommand(sourceResolveCmd));
+
+  if (needsResolve) {
+    return requestJson('/api/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        portalUrl: sourcePortalUrl,
+        mac: sourceMac,
+        cmd: sourceResolveCmd,
+        itemId: sourceItemId,
+        type: sourceContentKind || 'live'
+      })
+    }).then(function(resolved) {
+      return {
+        url: String(resolved.streamUrl || '').trim(),
+        headers: normalizeHeaders(resolved.playbackHeaders || {}),
+        mac: sourceMac
+      };
+    });
+  }
+
+  return Promise.resolve({
+    url: sourceUrl,
+    headers: normalizeHeaders(sourceHeaders || {}),
+    mac: sourceMac
+  });
+}
+
+function resolvePlayback(request) {
+  var existing = resolveExistingProxyRequest(request.url);
+  if (existing) {
+    return Promise.resolve(existing);
+  }
+
+  var normalizedHeaders = normalizeHeaders(request.headers || {});
+  var bypassInspection = isDirectTokenizedStalkerStreamUrl(request.url) || isStalkerLiveRequest(normalizedHeaders);
+  if (bypassInspection) {
+    var bypassKind = inferStreamKind(request.url, '');
+    var useCompatBypass = Boolean(request.preferCompatibilityProxy);
+    return Promise.resolve({
+      requestedUrl: request.url,
+      sourceUrl: request.url,
+      resolvedUrl: useCompatBypass
+        ? buildStreamUrl('/stream/compat', request.url, normalizedHeaders, request.mac)
+        : buildStreamUrl('/stream', request.url, normalizedHeaders, request.mac),
+      kind: useCompatBypass ? 'mpegts' : (bypassKind === 'unknown' ? 'mpegts' : bypassKind),
+      mimeType: useCompatBypass ? 'video/mp2t' : getMimeType(request.url, '', bypassKind)
+    });
+  }
+
+  var inspectUrl = buildStreamUrl('/stream/inspect', request.url, normalizedHeaders, request.mac);
+  return requestJson(inspectUrl)
+    .then(function(inspected) {
+      var finalUrl = String(inspected.finalUrl || request.url).trim();
+      var contentType = String(inspected.contentType || '').trim();
+      var kind = String(inspected.kind || inferStreamKind(finalUrl, contentType)).trim() || 'unknown';
+      var compatUrl = String(inspected.compatUrl || '').trim() || buildStreamUrl('/stream/compat', finalUrl, normalizedHeaders, request.mac);
+      var proxyUrl = String(inspected.proxyUrl || '').trim() || buildStreamUrl('/stream', finalUrl, normalizedHeaders, request.mac);
+      var useCompat = Boolean(request.preferCompatibilityProxy) || Boolean(inspected.transcodeRecommended);
+
+      if (!inspected.playable && useCompat) {
+        return {
+          requestedUrl: request.url,
+          sourceUrl: finalUrl,
+          resolvedUrl: compatUrl,
+          kind: 'mpegts',
+          mimeType: 'video/mp2t'
+        };
+      }
+
+      if (!inspected.playable) {
+        throw new Error(inspected.error || ('HTTP ' + inspected.status) || 'Stream oynatilamadi');
+      }
+
+      return {
+        requestedUrl: request.url,
+        sourceUrl: finalUrl,
+        resolvedUrl: useCompat ? compatUrl : proxyUrl,
+        kind: useCompat ? 'mpegts' : kind,
+        mimeType: useCompat ? 'video/mp2t' : String(inspected.mimeType || getMimeType(finalUrl, contentType, kind)).trim()
+      };
+    })
+    .catch(function() {
+      var fallbackKind = inferStreamKind(request.url, '');
+      var useCompatFallback = Boolean(request.preferCompatibilityProxy) || shouldPreferCompatibility(request.url, normalizedHeaders);
+      return {
+        requestedUrl: request.url,
+        sourceUrl: request.url,
+        resolvedUrl: useCompatFallback
+          ? buildStreamUrl('/stream/compat', request.url, normalizedHeaders, request.mac)
+          : buildStreamUrl('/stream', request.url, normalizedHeaders, request.mac),
+        kind: useCompatFallback ? 'mpegts' : fallbackKind,
+        mimeType: useCompatFallback ? 'video/mp2t' : getMimeType(request.url, '', fallbackKind)
+      };
+    });
+}
+
+function clearLoadTimeout() {
+  if (loadTimeoutId !== null) {
+    window.clearTimeout(loadTimeoutId);
+    loadTimeoutId = null;
+  }
+}
+
+function clearStallMonitor() {
+  if (stallMonitorId !== null) {
+    window.clearInterval(stallMonitorId);
+    stallMonitorId = null;
+  }
+}
+
+function clearReconnectTimer() {
+  if (reconnectTimerId !== null) {
+    window.clearTimeout(reconnectTimerId);
+    reconnectTimerId = null;
+  }
+}
+
+function notePlaybackProgress() {
+  lastObservedTime = Number(video.currentTime || 0);
+  lastProgressAt = Date.now();
+  stallRecoveryPending = false;
+  clearReconnectTimer();
+}
+
+function fallbackToYouTubeIframe(message) {
+  if (activePlaybackKind === 'yt-standalone') {
+    return false;
+  }
+  var ytId = extractYouTubeVideoId(sourceUrl);
+  if (!ytId) {
+    return false;
+  }
+  destroyPlayers();
+  playbackReady = false;
+  setInfo(message || 'YouTube iframe moduna geciliyor...');
+  playYouTubeStandalone(ytId);
+  return true;
+}
+
+function scheduleReconnect(reason, delayMs) {
+  if (userClosing || !sourceUrl || !activePlaybackKind) {
+    return;
+  }
+  if (activePlaybackKind === 'kelo') return; // kelo manages its own reconnection
+  if (reconnectTimerId !== null) {
+    return;
+  }
+
+  reconnectTimerId = window.setTimeout(function() {
+    reconnectTimerId = null;
+    if (userClosing) {
+      return;
+    }
+    setInfo((reason || 'Yayin koptu') + ', tekrar baglaniyor...');
+    startPlayback(activeForceCompat);
+  }, typeof delayMs === 'number' ? delayMs : 1200);
+}
+
+function markPlaybackReady() {
+  playbackReady = true;
+  clearLoadTimeout();
+  notePlaybackProgress();
+}
+
+function scheduleLoadTimeout(forceCompat) {
+  clearLoadTimeout();
+  loadTimeoutId = window.setTimeout(function() {
+    if (playbackReady) {
+      return;
+    }
+
+    if (!compatibilityFallbackActive && !forceCompat && canUseCompatibilityFallback(sourceUrl, sourceHeaders)) {
+      compatibilityFallbackActive = true;
+      setInfo('Yukleme asimi, uyumluluk moduna geciliyor...');
+      startPlayback(true);
+      return;
+    }
+
+    if (isProxiedYoutubeUrl(sourceUrl) && fallbackToYouTubeIframe('YouTube stream zaman asimina ugradi, iframe moduna geciliyor...')) {
+      return;
+    }
+
+    setInfo('HTML5 player zaman asimina ugradi');
+  }, forceCompat ? 35000 : 22000);
+}
+
+function destroyHls() {
+  if (!hlsInst) return;
+  try { hlsInst.destroy(); } catch (error) {}
+  hlsInst = null;
+}
+
+function destroyMpegts() {
+  if (!mpegtsInst) return;
+  try { mpegtsInst.pause(); } catch (error) {}
+  try { mpegtsInst.unload(); } catch (error) {}
+  try { mpegtsInst.detachMediaElement(); } catch (error) {}
+  try { mpegtsInst.destroy(); } catch (error) {}
+  mpegtsInst = null;
+}
+
+function resetNativePlayer() {
+  video.pause();
+  video.removeAttribute('src');
+  video.querySelectorAll('source').forEach(function(source) { source.remove(); });
+  video.load();
+}
+
+function destroyPlayers() {
+  clearStallMonitor();
+  clearReconnectTimer();
+  destroyHls();
+  destroyMpegts();
+  destroyKeloYtPlayer();
+  destroyStandaloneYtPlayer();
+  resetNativePlayer();
+}
+
+function startStallMonitor() {
+  clearStallMonitor();
+  lastObservedTime = Number(video.currentTime || 0);
+  lastProgressAt = Date.now();
+  stallRecoveryPending = false;
+
+  stallMonitorId = window.setInterval(function() {
+    if (!playbackReady || !activePlaybackKind) {
+      return;
+    }
+    if (video.paused || video.ended || video.seeking) {
+      return;
+    }
+
+    var currentTime = Number(video.currentTime || 0);
+    if (currentTime > lastObservedTime + 0.2) {
+      notePlaybackProgress();
+      return;
+    }
+
+    if ((Date.now() - lastProgressAt) < 9000 || stallRecoveryPending) {
+      return;
+    }
+
+    stallRecoveryPending = true;
+    setInfo('Yayin durdu, tekrar baglaniyor...');
+    if (activePlaybackKind === 'kelo' && _keloActiveChannelId) {
+      playKeloDirectStream(_keloActiveChannelId);
+    } else {
+      startPlayback(activeForceCompat);
+    }
+  }, 3000);
+}
+
+function addSource(url, type) {
+  var source = document.createElement('source');
+  source.src = url;
+  source.type = type;
+  video.appendChild(source);
+}
+
+function handlePlaybackFailure(message, forceCompat) {
+  clearLoadTimeout();
+  if ((isProxiedYoutubeUrl(sourceUrl) || isRawYouTubeUrl(sourceUrl)) &&
+      fallbackToYouTubeIframe('YouTube stream acilamadi, iframe moduna geciliyor...')) {
+    return;
+  }
+  if (!compatibilityFallbackActive && !forceCompat && canUseCompatibilityFallback(sourceUrl, sourceHeaders)) {
+    compatibilityFallbackActive = true;
+    setInfo('Player hatasi, uyumluluk moduna geciliyor...');
+    startPlayback(true);
+    return;
+  }
+
+  setInfo(message || 'Oynatma basarisiz');
+}
+
+function playNative(url, mimeType, forceCompat) {
+  console.log('[Player] playNative called with:', { url: url, mimeType: mimeType, forceCompat: forceCompat });
+  setInfo('Native player baslatiliyor...');
+  addSource(url, mimeType || 'video/mp4');
+  video.load();
+  var playPromise = video.play();
+  if (playPromise && typeof playPromise.catch === 'function') {
+    playPromise.catch(function(error) {
+      console.log('[Player] Native play error:', error);
+      handlePlaybackFailure('Native oynatma hatasi: ' + error.message, forceCompat);
+    });
+  }
+}
+
+// KeloTV loop oynatma: YouTube iframe API (ses+video+seek — en guvenilir yontem)
+var _keloActiveChannelId = null;
+var keloYtPlayer = null;
+var standaloneYtPlayer = null;
+
+function notifyVideoEnded() {
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage({ type: 'video-ended' }, window.location.origin);
+  }
+}
+
+function destroyStandaloneYtPlayer() {
+  if (standaloneYtPlayer) { try { standaloneYtPlayer.destroy(); } catch(_) {} standaloneYtPlayer = null; }
+  var w = document.getElementById('kelo-yt-wrapper');
+  if (w) { w.style.display = 'none'; w.innerHTML = ''; }
+  video.style.display = '';
+}
+
+function playYouTubeStandalone(videoId) {
+  activePlaybackKind = 'yt-standalone';
+  video.style.display = 'none';
+  var ytW = document.getElementById('kelo-yt-wrapper');
+  ytW.innerHTML = '<div id="standalone-yt-player" style="width:100%;height:100%;"></div>';
+  ytW.style.cssText = 'display:flex;flex:1;width:100%;min-height:0;background:#000;';
+  clearLoadTimeout();
+  setInfo('YouTube yukluyor...');
+  ensureYtApiLoaded(function(err) {
+    if (err || !window.YT || !YT.Player) {
+      setInfo('YouTube API hatasi');
+      destroyStandaloneYtPlayer();
+      return;
+    }
+    standaloneYtPlayer = new YT.Player('standalone-yt-player', {
+      width: '100%', height: '100%', videoId: videoId,
+      playerVars: { autoplay: 1, controls: 1, modestbranding: 1, rel: 0, iv_load_policy: 3 },
+      events: {
+        onReady: function(e) {
+          e.target.playVideo();
+          playbackReady = true;
+          setInfo('▶ ' + sourceName);
+        },
+        onStateChange: function(e) {
+          if (e.data === YT.PlayerState.ENDED && !userClosing) {
+            notifyVideoEnded();
+          }
+        },
+        onError: function(e) {
+          setInfo('YouTube hatasi (kod: ' + e.data + ')');
+        }
+      }
+    });
+  });
+}
+
+function ensureYtApiLoaded(cb) {
+  if (window.YT && typeof YT.Player === 'function') { cb(); return; }
+  if (!window._ytQ) window._ytQ = [];
+  window._ytQ.push(cb);
+  if (document.getElementById('yt-iframe-api')) return;
+  var s = document.createElement('script');
+  s.id = 'yt-iframe-api';
+  s.src = 'https://www.youtube.com/iframe_api';
+  s.onerror = function() { var q = window._ytQ||[]; window._ytQ=[]; q.forEach(function(f){f(true);}); };
+  document.head.appendChild(s);
+  window.onYouTubeIframeAPIReady = function() { var q=window._ytQ||[]; window._ytQ=[]; q.forEach(function(f){f();}); };
+}
+
+function destroyKeloYtPlayer() {
+  if (keloYtPlayer) { try{keloYtPlayer.destroy();}catch(_){} keloYtPlayer = null; }
+  var w = document.getElementById('kelo-yt-wrapper');
+  if (w) { w.style.display = 'none'; w.innerHTML = ''; }
+  video.style.display = '';
+}
+
+function playKeloDirectStream(channelId) {
+  if (userClosing) return;
+  _keloActiveChannelId = channelId;
+
+  setInfo('Kanal pozisyonu hesaplaniyor...');
+  requestJson('/api/loop-channels/' + channelId + '/current-stream').then(function(data) {
+    if (!data || !data.ok || !data.streamUrl) {
+      setInfo('Kanal verisi alinamadi: ' + ((data && data.error) || 'bilinmeyen hata'));
+      return;
+    }
+
+    if (_keloActiveChannelId !== channelId) return; // baska kanal yuklenmeye basladi
+
+    destroyPlayers();
+    playbackReady = false;
+    activePlaybackKind = 'kelo';
+    activeForceCompat = false;
+    sourceUrl = data.streamUrl;
+
+    var targetTime = Number(data.offsetSeconds) || 0;
+    var seekPending = targetTime > 1;
+    var readyFired = false;
+
+    function onReadyToPlay() {
+      if (readyFired) return;
+      readyFired = true;
+      markPlaybackReady();
+      video.play().catch(function(e) { setInfo('Oynatma hatasi: ' + e.message); });
+    }
+
+    function onLoadedMetadata() {
+      if (seekPending) {
+        try { video.currentTime = targetTime; } catch (_) {}
+      }
+    }
+
+    function onSeeked() {
+      if (seekPending) {
+        seekPending = false;
+        onReadyToPlay();
+      }
+    }
+
+    function onCanPlay() {
+      if (!seekPending) onReadyToPlay();
+    }
+
+    function cleanup() {
+      video.removeEventListener('loadedmetadata', onLoadedMetadata);
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('canplay', onCanPlay);
+      video.removeEventListener('ended', onEnded);
+      video.removeEventListener('error', onVideoError);
+    }
+
+    function onEnded() {
+      cleanup();
+      destroyHls();
+      activePlaybackKind = '';
+      if (!userClosing && _keloActiveChannelId === channelId) {
+        window.setTimeout(function() { playKeloDirectStream(channelId); }, 400);
+      }
+    }
+
+    function onVideoError() {
+      cleanup();
+      destroyHls();
+      if (!userClosing && _keloActiveChannelId === channelId) {
+        setInfo('Video hatasi, tekrar deneniyor...');
+        window.setTimeout(function() { playKeloDirectStream(channelId); }, 3000);
+      }
+    }
+
+    video.addEventListener('loadedmetadata', onLoadedMetadata);
+    video.addEventListener('seeked', onSeeked);
+    video.addEventListener('canplay', onCanPlay);
+    video.addEventListener('ended', onEnded);
+    video.addEventListener('error', onVideoError);
+
+    var titleInfo = data.title ? ('"' + data.title + '"') : ('Video #' + (data.videoIndex + 1));
+    var posInfo = targetTime > 0 ? (' · ' + Math.floor(targetTime) + 's konumundan') : '';
+    setInfo(titleInfo + posInfo + ' yukleniyor...');
+
+    // streamUrl varsa direkt playHls — yt-dlp HLS URL veya normal stream
+    if (data.streamUrl && data.isHls) {
+      cleanup();
+      playHls(data.streamUrl, false);
+      return;
+    }
+
+    // streamUrl var ama HLS değil — native video
+    if (data.streamUrl && !data.isHls && !data.videoId) {
+      // video listeners zaten ekli, sadece src ata
+      video.src = data.streamUrl;
+      video.load();
+      scheduleLoadTimeout(false);
+      return;
+    }
+
+    // YouTube iframe — sadece streamUrl yoksa
+    if (data.videoId && !data.streamUrl) {
+      cleanup(); // remove native video listeners, not needed for YT iframe
+      var cId = channelId, cTime = targetTime;
+      var ytW = document.getElementById('kelo-yt-wrapper');
+      ytW.innerHTML = '<div id="kelo-yt-player" style="width:100%;height:100%;"></div>';
+      ytW.style.cssText = 'display:flex;flex:1;width:100%;min-height:0;background:#000;';
+      video.style.display = 'none';
+      scheduleLoadTimeout(false);
+      ensureYtApiLoaded(function(err) {
+        if (err || !window.YT || !YT.Player) {
+          // YouTube API failed, fall back to native stream
+          destroyKeloYtPlayer();
+          video.style.display = '';
+          video.src = data.streamUrl;
+          video.load();
+          return;
+        }
+        if (_keloActiveChannelId !== cId) return;
+        keloYtPlayer = new YT.Player('kelo-yt-player', {
+          width: '100%', height: '100%', videoId: data.videoId,
+          playerVars: { autoplay: 1, controls: 1, start: Math.floor(cTime), modestbranding: 1, rel: 0 },
+          events: {
+            onReady: function(e) {
+              if (_keloActiveChannelId !== cId) return;
+              if (cTime > 1) e.target.seekTo(cTime, true);
+              e.target.playVideo();
+              markPlaybackReady();
+              setInfo('▶ ' + (data.title || ('Video #' + (data.videoIndex + 1))));
+            },
+            onStateChange: function(e) {
+              if (_keloActiveChannelId !== cId) return;
+              if (e.data === YT.PlayerState.ENDED && !userClosing) {
+                window.setTimeout(function() { if (_keloActiveChannelId===cId) playKeloDirectStream(cId); }, 400);
+              }
+            },
+            onError: function() {
+              if (_keloActiveChannelId !== cId || userClosing) return;
+              setInfo('YouTube hatasi, tekrar deneniyor...');
+              window.setTimeout(function() { if (_keloActiveChannelId===cId) playKeloDirectStream(cId); }, 3000);
+            }
+          }
+        });
+      });
+      return;
+    }
+
+    // Non-YouTube: HLS.js or native player
+    if (data.isHls && window.Hls && Hls.isSupported()) {
+      hlsInst = new Hls({ debug: false, enableWorker: true, lowLatencyMode: false });
+      hlsInst.attachMedia(video);
+      hlsInst.loadSource(data.streamUrl);
+      hlsInst.on(Hls.Events.MANIFEST_PARSED, function() {
+        if (seekPending) {
+          try { video.currentTime = targetTime; } catch (_) {}
+        } else {
+          onReadyToPlay();
+        }
+      });
+      hlsInst.on(Hls.Events.ERROR, function(_ev, errData) {
+        if (errData && errData.fatal) {
+          cleanup();
+          destroyHls();
+          if (!userClosing && _keloActiveChannelId === channelId) {
+            setInfo('HLS hatasi, tekrar deneniyor...');
+            window.setTimeout(function() { playKeloDirectStream(channelId); }, 3000);
+          }
+        }
+      });
+    } else {
+      video.src = data.streamUrl;
+      video.load();
+    }
+    scheduleLoadTimeout(false);
+  }).catch(function(e) {
+    setInfo('Kanal yukleme hatasi: ' + ((e && e.message) || 'bilinmeyen hata'));
+  });
+}
+
+function playHls(url, forceCompat) {
+  if (!window.Hls || !Hls.isSupported()) {
+    playNative(url, 'application/x-mpegURL', forceCompat);
+    return;
+  }
+
+  setInfo('HLS manifest yukleniyor...');
+  hlsInst = new Hls({ debug: false, enableWorker: true, lowLatencyMode: false });
+  hlsInst.attachMedia(video);
+  hlsInst.loadSource(url);
+  hlsInst.on(Hls.Events.MANIFEST_PARSED, function() {
+    markPlaybackReady();
+    setInfo('HLS manifest hazir');
+    video.play().catch(function(error) {
+      handlePlaybackFailure('HLS oynatma hatasi: ' + error.message, forceCompat);
+    });
+  });
+  hlsInst.on(Hls.Events.ERROR, function(_event, data) {
+    if (data && data.fatal) {
+      if (isProxiedYoutubeUrl(sourceUrl) && fallbackToYouTubeIframe('YouTube HLS yuklenemedi, iframe moduna geciliyor...')) {
+        return;
+      }
+      if (isTailscaleHlsUrl(url) && !compatibilityFallbackActive) {
+        compatibilityFallbackActive = true;
+        destroyHls();
+        clearLoadTimeout();
+        setInfo('Direkt HLS acilamadi, Vercel proxy deneniyor...');
+        scheduleLoadTimeout(forceCompat);
+        playHls(buildHlsProxyUrl(url), forceCompat);
+        return;
+      }
+      // Special message for kelo loop HLS served from a host that can't generate segments
+      var errUrl = String((data.url || url) || '');
+      if ((data.details === 'manifestLoadError' || data.details === 'manifestLoadTimeOut') &&
+          errUrl.indexOf('/hls/kelo_') !== -1) {
+        handlePlaybackFailure(
+          'Loop-generated HLS cannot be served from this host. Configure STREAM_BASE_URL or use an external stream URL.',
+          forceCompat
+        );
+        return;
+      }
+      handlePlaybackFailure('HLS hatasi: ' + (data.details || 'bilinmeyen'), forceCompat);
+    }
+  });
+}
+
+function startMpegtsPlayback(url, forceCompat) {
+  if (!window.mpegts || !mpegts.isSupported()) {
+    playNative(url, 'video/mp2t', forceCompat);
+    return;
+  }
+
+  setInfo(forceCompat ? 'Uyumluluk akisi yukleniyor...' : 'MPEG-TS yukleniyor...');
+  mpegtsInst = mpegts.createPlayer({
+    type: 'mpegts',
+    isLive: true,
+    url: url
+  });
+
+  var events = mpegts.Events || {};
+  if (events.MEDIA_INFO) {
+    mpegtsInst.on(events.MEDIA_INFO, function() {
+      markPlaybackReady();
+      setInfo('MPEG-TS medya bilgisi alindi');
+    });
+  }
+  if (events.METADATA_ARRIVED) {
+    mpegtsInst.on(events.METADATA_ARRIVED, function() {
+      markPlaybackReady();
+      setInfo('Yayin oynatiliyor');
+    });
+  }
+  if (events.ERROR) {
+    mpegtsInst.on(events.ERROR, function(errorType, errorDetail, errorInfo) {
+      var message = '';
+      if (errorInfo && errorInfo.msg) message = String(errorInfo.msg);
+      else if (errorDetail) message = String(errorDetail);
+      else if (errorType) message = String(errorType);
+      // FormatUnsupported: stream MPEG-TS değil (HLS veya MP4 olabilir) — HLS.js ile dene
+      if (errorDetail === 'FormatUnsupported' || message === 'FormatUnsupported') {
+        destroyMpegts();
+        setInfo('Format desteklenmiyor, HLS deneniyor...');
+        playHls(url, forceCompat);
+        return;
+      }
+      handlePlaybackFailure('MPEG-TS hatasi: ' + (message || 'bilinmeyen hata'), forceCompat);
+    });
+  }
+  if (events.LOADING_COMPLETE) {
+    mpegtsInst.on(events.LOADING_COMPLETE, function() {
+      scheduleReconnect('Yayin tamamladi', 600);
+    });
+  }
+
+  mpegtsInst.attachMediaElement(video);
+  mpegtsInst.load();
+  var playPromise = mpegtsInst.play();
+  if (playPromise && typeof playPromise.catch === 'function') {
+    playPromise.catch(function(error) {
+      handlePlaybackFailure('MPEG-TS oynatma hatasi: ' + error.message, forceCompat);
+    });
+  }
+}
+
+function playMpegts(url, forceCompat) {
+  startMpegtsPlayback(url, forceCompat);
+}
+
+function startResolvedPlayback(resolved, forceCompat, requestId) {
+  if (requestId !== currentRequestId) {
+    return;
+  }
+
+  destroyPlayers();
+  playbackReady = false;
+  activePlaybackKind = resolved.kind || '';
+  activeForceCompat = !!forceCompat;
+  scheduleLoadTimeout(forceCompat);
+
+  if (resolved.kind === 'mpegts') {
+    playMpegts(resolved.resolvedUrl, forceCompat);
+    return;
+  }
+
+  if (resolved.kind === 'hls') {
+    playHls(resolved.resolvedUrl, forceCompat);
+    return;
+  }
+
+  playNative(resolved.resolvedUrl, resolved.mimeType, forceCompat);
+}
+
+function startPlayback(forceCompat) {
+  var requestId = ++currentRequestId;
+  var preferCompat = Boolean(forceCompat || initialPreferCompat);
+
+  destroyPlayers();
+  playbackReady = false;
+  setInfo(preferCompat ? 'Uyumluluk modu cozuluyor...' : 'Yayin cozuluyor...');
+
+  resolveFreshSourceRequest().then(function(freshSource) {
+    return resolvePlayback({
+      url: freshSource.url,
+      headers: freshSource.headers,
+      mac: freshSource.mac,
+      preferCompatibilityProxy: preferCompat
+    });
+  }).then(function(resolved) {
+    if (requestId !== currentRequestId) {
+      return;
+    }
+
+    if (isProxiedYoutubeUrl(sourceUrl) && resolved.kind === 'unknown' &&
+        fallbackToYouTubeIframe('YouTube proxy dogrulanamadi, iframe moduna geciliyor...')) {
+      return;
+    }
+
+    setInfo('Kaynak hazir: ' + resolved.kind + ' | ' + resolved.resolvedUrl.slice(0, 90));
+    startResolvedPlayback(resolved, preferCompat, requestId);
+  }).catch(function(error) {
+    handlePlaybackFailure(error.message || 'Yayin cozulmedi', preferCompat);
+  });
+}
+
+video.addEventListener('loadedmetadata', function() {
+  markPlaybackReady();
+});
+
+video.addEventListener('canplay', function() {
+  markPlaybackReady();
+});
+
+video.addEventListener('playing', function() {
+  markPlaybackReady();
+  startStallMonitor();
+  setInfo('Yayin oynatiliyor');
+});
+
+video.addEventListener('timeupdate', function() {
+  notePlaybackProgress();
+});
+
+video.addEventListener('stalled', function() {
+  if (playbackReady && !stallRecoveryPending) {
+    stallRecoveryPending = true;
+    scheduleReconnect('Yayin takildi', 400);
+  }
+});
+
+video.addEventListener('waiting', function() {
+  if (playbackReady) {
+    setInfo('Yayin verisi bekleniyor...');
+  }
+});
+
+video.addEventListener('ended', function() {
+  if (activePlaybackKind === 'mpegts' || activePlaybackKind === 'hls') {
+    scheduleReconnect('Yayin sonlandi', 400);
+  } else if (activePlaybackKind !== 'kelo' && activePlaybackKind !== 'yt-standalone') {
+    // VOD bitti — parent'a bildir (auto-advance)
+    notifyVideoEnded();
+  }
+});
+
+video.addEventListener('pause', function() {
+  if (!(activePlaybackKind === 'mpegts' || activePlaybackKind === 'hls')) {
+    return;
+  }
+  if (userClosing || video.ended || video.seeking || !playbackReady) {
+    return;
+  }
+  if (video.readyState <= 2) {
+    scheduleReconnect('Yayin durdu', 900);
+  }
+});
+
+video.addEventListener('error', function() {
+  if (activePlaybackKind === 'kelo') return; // kelo handles its own errors
+  var message = video.error && video.error.message ? video.error.message : 'Bilinmeyen video hatasi';
+  handlePlaybackFailure('Video hatasi: ' + message, compatibilityFallbackActive);
+});
+
+function isProxiedYoutubeUrl(url) {
+  try {
+    var parsed = new URL(url);
+    if (parsed.origin !== window.location.origin) return false;
+    if (/^\/proxy\/yt_[A-Za-z0-9_-]{11}$/.test(parsed.pathname)) return true;
+    if (parsed.pathname !== '/stream') return false;
+    var inner = parsed.searchParams.get('url') || '';
+    var decodedInner = decodeURIComponent(inner);
+    return decodedInner.indexOf('googlevideo.com') !== -1 || 
+           decodedInner.indexOf('youtube.com') !== -1 || 
+           decodedInner.indexOf('youtu.be') !== -1;
+  } catch (e) { return false; }
+}
+
+function isRawYouTubeUrl(url) {
+  var normalized = String(url || '').trim().toLowerCase();
+  return normalized.indexOf('youtube.com/watch') !== -1 ||
+         normalized.indexOf('youtu.be/') !== -1 ||
+         normalized.indexOf('youtube.com/live/') !== -1;
+}
+
+function extractYouTubeVideoId(url) {
+  var m = String(url||'').match(/(?:yt_|youtube\.com\/(?:watch\?v=|live\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+function buildYoutubeProxyUrl(videoId) {
+  return window.location.origin + '/proxy/yt_' + encodeURIComponent(videoId);
+}
+
+function resolveYouTubeUrl(url) {
+  return requestJson('/api/youtube/resolve?url=' + encodeURIComponent(url)).then(function(data) {
+    return data; // { streamUrl, videoId, isHls, originalUrl }
+  });
+}
+
+window.addEventListener('load', function() {
+  sourceUrl = decodeURIComponent(getUrlParam('url') || '');
+  sourceName = decodeURIComponent(getUrlParam('name') || 'IPTV Stream');
+  sourceMac = getUrlParam('mac') || '';
+  sourceType = decodeURIComponent(getUrlParam('sourceType') || '');
+  sourcePortalUrl = decodeURIComponent(getUrlParam('portalUrl') || '');
+  sourceResolveCmd = decodeURIComponent(getUrlParam('resolveCmd') || '');
+  sourceItemId = decodeURIComponent(getUrlParam('sourceId') || '');
+  sourceContentKind = decodeURIComponent(getUrlParam('streamType') || 'live') || 'live';
+  initialPreferCompat = getUrlParam('preferCompat') === '1';
+
+  // Normalize local paths like "/hls/..." into absolute URLs so /stream and URL parsing work consistently.
+  if (sourceUrl && sourceUrl.charAt(0) === '/') {
+    try {
+      sourceUrl = new URL(sourceUrl, window.location.origin).toString();
+    } catch (error) {}
+  }
+
+  var sourceMetaParam = getUrlParam('sourceMeta');
+  if (sourceMetaParam) {
+    try {
+      var sourceMeta = JSON.parse(decodeURIComponent(sourceMetaParam));
+      if (sourceMeta.originalUrl && isRawYouTubeUrl(sourceMeta.originalUrl)) {
+        sourceUrl = sourceMeta.originalUrl;
+      }
+    } catch (error) {
+      console.log('SourceMeta parse hatasi:', error);
+    }
+  }
+
+  var headersParam = getUrlParam('headers');
+  if (headersParam) {
+    try {
+      sourceHeaders = normalizeHeaders(JSON.parse(decodeURIComponent(headersParam)));
+    } catch (error) {
+      sourceHeaders = {};
+    }
+  }
+
+  if (!initialPreferCompat) {
+    initialPreferCompat = shouldPreferCompatibility(sourceUrl, sourceHeaders);
+  }
+
+  document.getElementById('player-title').textContent = sourceName;
+
+  if (!sourceUrl) {
+    setInfo('Stream URL bulunamadi');
+    return;
+  }
+
+  // Tailscale HLS output already sends CORS/Range headers; play it directly instead of
+  // routing every segment through a Vercel serverless function.
+  if (isTailscaleHlsUrl(sourceUrl)) {
+    console.log('[HLS-Direct] Tailscale HLS URL direkt oynatiliyor');
+    sourceHeaders = {};
+    compatibilityFallbackActive = false;
+    activePlaybackKind = 'hls';
+    activeForceCompat = false;
+    scheduleLoadTimeout(false);
+    playHls(sourceUrl, false);
+    return;
+  }
+
+  // Raw YouTube URL'si - coz veya iframe kullan
+  if (isRawYouTubeUrl(sourceUrl)) {
+    console.log('[YouTube] Raw URL detected:', sourceUrl);
+    setInfo('YouTube video cozuluyor...');
+    var _ytFallbackId = extractYouTubeVideoId(sourceUrl);
+    resolveYouTubeUrl(sourceUrl).then(function(data) {
+      if (data.playerMode === 'iframe' || (!data.streamUrl && data.videoId)) {
+        // iframe fallback (Vercel/serverless — stream alinamadi)
+        var iframeId = data.videoId || _ytFallbackId;
+        if (iframeId) {
+          console.log('[YouTube] iframe modu, videoId:', iframeId);
+          playYouTubeStandalone(iframeId);
+        } else {
+          setInfo('YouTube: stream cozulemedi');
+        }
+      } else if ((data.playerMode === 'hls' || data.isHls || data.hlsUrl) && data.streamUrl) {
+        // Canli yayin: HLS.js ile oynat
+        console.log('[YouTube] HLS stream bulundu, HLS.js ile oynatiliyor');
+        sourceUrl = data.hlsUrl || data.streamUrl;
+        sourceHeaders = {};
+        compatibilityFallbackActive = false;
+        setInfo('YouTube canli yayin yukleniyor...');
+        startPlayback(false);
+      } else if (data.streamUrl) {
+        // Piped MP4/stream — /stream proxy ile dene
+        console.log('[YouTube] Piped stream bulundu, proxy ile oynatiliyor');
+        sourceUrl = buildStreamUrl('/stream', data.streamUrl, {}, '');
+        sourceHeaders = {};
+        compatibilityFallbackActive = false;
+        startPlayback(false);
+      } else if (_ytFallbackId) {
+        console.log('[YouTube] Hicbir stream yok, iframe fallback:', _ytFallbackId);
+        playYouTubeStandalone(_ytFallbackId);
+      } else {
+        setInfo('YouTube: stream cozulemedi');
+      }
+    }).catch(function(error) {
+      console.log('[YouTube] Resolve hatasi:', error.message);
+      if (_ytFallbackId) {
+        console.log('[YouTube] Hata sonrasi iframe fallback:', _ytFallbackId);
+        playYouTubeStandalone(_ytFallbackId);
+      } else {
+        setInfo('YouTube hatasi: ' + error.message);
+      }
+    });
+    return;
+  }
+
+  // YouTube proxy URL'si - genel playback yolunu kullan ki HLS/MP4 dogru secilsin
+  if (isProxiedYoutubeUrl(sourceUrl)) {
+    console.log('[YouTube] Detected proxied YouTube URL:', sourceUrl);
+    compatibilityFallbackActive = false;
+    setInfo('YouTube video yukleniyor...');
+    startPlayback(false);
+    return;
+  }
+
+  compatibilityFallbackActive = false;
+  startPlayback(Boolean(initialPreferCompat));
+});
+
+window.addEventListener('beforeunload', function() {
+  userClosing = true;
+  clearLoadTimeout();
+  clearStallMonitor();
+  clearReconnectTimer();
+  destroyPlayers();
+});
+</script>
+</body>
+</html>

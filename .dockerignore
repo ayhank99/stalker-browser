@@ -1,0 +1,17 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+.codex
+.venv
+.venv-*/
+__pycache__
+android-tv
+desktop
+windows-desktop
+docs
+.vercel
+*.log
+*.zip
+*.tar.gz
+public/hls/

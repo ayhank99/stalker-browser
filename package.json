@@ -1,0 +1,30 @@
+{
+  "name": "iptv-manager",
+  "version": "3.0.0",
+  "scripts": {
+    "build": "npm run build:ui",
+    "build:ui": "node scripts/build-ui.mjs",
+    "build:dashboard": "node scripts/build-ui-dashboard.mjs",
+    "start": "node server.js",
+    "migrate:db": "node scripts/migrate-to-db.js",
+    "compact:playlists": "node scripts/compact-playlists.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@ybd-project/ytdl-core": "^6.0.8",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.1",
+    "esbuild": "^0.28.0",
+    "express": "^4.18.2",
+    "ffmpeg-static": "^5.3.0",
+    "node-fetch": "^2.7.0",
+    "pg": "^8.20.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "typescript": "^6.0.2",
+    "youtube-dl-exec": "^3.1.6"
+  }
+}

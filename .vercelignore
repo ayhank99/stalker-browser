@@ -1,0 +1,34 @@
+data
+.env
+.env.local
+.env*.local
+.vercel-env-check
+server.js.backup
+fix-*.js
+debug*.js
+sonuc.txt
+
+# These directories are not needed for Vercel deployment
+node_modules
+android-tv
+desktop
+windows-desktop
+docs
+scripts
+src
+
+# HLS runtime output — binary .ts segments must not be deployed
+public/hls/
+
+# Large or temporary files
+*.zip
+*.tar.gz
+*.log
+*.pid
+*.err.log
+*.out.log
+__pycache__
+.venv
+.venv-*/
+.gradle-user-home
+.android-sdk-home
