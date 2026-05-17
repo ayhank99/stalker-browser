@@ -22076,6 +22076,9 @@ function EditorApp() {
   const [qaNewCategory, setQaNewCategory] = (0, import_react.useState)("");
   const [qaAddedCount, setQaAddedCount] = (0, import_react.useState)(0);
   const [vercelDeploying, setVercelDeploying] = (0, import_react.useState)(false);
+  const [modalState, setModalState] = (0, import_react.useState)(null);
+  const [modalPromptValue, setModalPromptValue] = (0, import_react.useState)("");
+  const modalResolveRef = (0, import_react.useRef)(null);
   const { sources, curated } = (0, import_react.useMemo)(() => splitPlaylists(playlists), [playlists]);
   const source = sources.find((p) => p.id === sourceId) || sources[0] || null;
   const curatedPlaylist = curated.find((p) => p.id === curatedId) || curated[0] || null;
@@ -22402,7 +22405,7 @@ function EditorApp() {
     }
   }
   async function createEmptyCuratedPlaylist() {
-    const name = window.prompt("Bos playlist adi", "Benim Playlistim");
+    const name = await showPromptModal("Bos playlist adi", "Benim Playlistim");
     if (!name) return;
     try {
       const created = await createPlaylist({ name, type: "custom", data: emptyData(), meta: { playlistBucket: "curated" } });
@@ -22418,7 +22421,7 @@ function EditorApp() {
   }
   async function handleDeleteCuratedPlaylist() {
     if (!draftCurated) return;
-    if (!window.confirm(`'${draftCurated.name}' playlistini silmek istiyor musun?`)) return;
+    if (!await showConfirmModal(`'${draftCurated.name}' playlistini silmek istiyor musun?`)) return;
     try {
       await deletePlaylist(draftCurated.id);
       setPreviewUrl("");
@@ -22512,16 +22515,43 @@ function EditorApp() {
     setQaLogo("");
     setQaAddedCount((c) => c + 1);
   }
-  const handleCreateCategory = (0, import_react.useCallback)(() => {
-    const name = window.prompt("Yeni kategori adi", "");
+  function showConfirmModal(message2) {
+    return new Promise((resolve) => {
+      modalResolveRef.current = resolve;
+      setModalState({ type: "confirm", message: message2 });
+    });
+  }
+  function showPromptModal(message2, defaultValue = "") {
+    return new Promise((resolve) => {
+      modalResolveRef.current = resolve;
+      setModalPromptValue(defaultValue);
+      setModalState({ type: "prompt", message: message2, defaultValue });
+    });
+  }
+  function handleModalConfirm() {
+    const resolve = modalResolveRef.current;
+    const isPrompt = modalState?.type === "prompt";
+    setModalState(null);
+    modalResolveRef.current = null;
+    if (resolve) resolve(isPrompt ? modalPromptValue : true);
+  }
+  function handleModalCancel() {
+    const resolve = modalResolveRef.current;
+    const isPrompt = modalState?.type === "prompt";
+    setModalState(null);
+    modalResolveRef.current = null;
+    if (resolve) resolve(isPrompt ? null : false);
+  }
+  const handleCreateCategory = (0, import_react.useCallback)(async () => {
+    const name = await showPromptModal("Yeni kategori adi", "");
     if (!name) return;
     updateDraft((playlist) => {
       ensureGroup(playlist.data, curatedKind, name);
     });
     setCuratedGroup(name);
   }, [curatedKind]);
-  const handleRenameCategory = (0, import_react.useCallback)((group) => {
-    const next = window.prompt("Kategori adi", group);
+  const handleRenameCategory = (0, import_react.useCallback)(async (group) => {
+    const next = await showPromptModal("Kategori adi", group);
     if (!next || next === group) return;
     updateDraft((playlist) => {
       playlist.data[curatedKind][next] = playlist.data[curatedKind][group] || [];
@@ -23273,6 +23303,27 @@ function EditorApp() {
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { className: "btn btn-primary wizard-apply-btn", onClick: applyWizardSelection, disabled: !wizardCounts.total, children: wizardTargetPlaylist ? wizardTransferMode === "move" ? `\u2197 ${selectedCategoryCount} Kategoriyi Tasi` : `\u29C9 ${selectedCategoryCount} Kategoriyi Kopyala` : wizardTransferMode === "move" ? "\u2197 Tasi ve Olustur" : "\u29C9 Kopyala ve Olustur" })
+      ] })
+    ] }) }),
+    modalState && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(3px)" }, onClick: handleModalCancel, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "modal-box", style: { background: "#0c1929", border: "1px solid rgba(63,109,167,0.45)", borderRadius: "14px", padding: "28px 32px", minWidth: "320px", maxWidth: "480px", width: "90vw", boxShadow: "0 8px 48px rgba(0,0,0,0.7)" }, onClick: (e) => e.stopPropagation(), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "modal-message", style: { color: "#e8edf3", fontSize: "15px", lineHeight: 1.55, marginBottom: modalState.type === "prompt" ? "14px" : "24px" }, children: modalState.message }),
+      modalState.type === "prompt" && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+        "input",
+        {
+          type: "text",
+          value: modalPromptValue,
+          onChange: (e) => setModalPromptValue(e.target.value),
+          onKeyDown: (e) => {
+            if (e.key === "Enter") handleModalConfirm();
+            if (e.key === "Escape") handleModalCancel();
+          },
+          autoFocus: true,
+          style: { width: "100%", boxSizing: "border-box", padding: "9px 12px", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(63,109,167,0.4)", borderRadius: "8px", color: "#e8edf3", fontSize: "14px", outline: "none", marginBottom: "20px" }
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "modal-btns", style: { display: "flex", justifyContent: "flex-end", gap: "10px" }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { onClick: handleModalCancel, style: { padding: "8px 18px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.08)", color: "#c9d3de", cursor: "pointer", fontSize: "13px" }, children: "\u0130ptal" }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { onClick: handleModalConfirm, style: { padding: "8px 18px", borderRadius: "8px", border: "none", background: "#2d6db5", color: "#fff", cursor: "pointer", fontSize: "13px", fontWeight: 600 }, children: "Tamam" })
       ] })
     ] }) })
   ] });
