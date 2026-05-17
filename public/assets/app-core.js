@@ -975,10 +975,27 @@ export async function refreshPlaylistData(playlist, onProgress) {
   }
 
   const syncStamp = new Date().toISOString()
+
+  let syncWarning = ''
+  const accountStatus = String((remoteMeta && remoteMeta.accountStatus) || '').trim()
+  if (accountStatus === '0') {
+    syncWarning = 'Hesap devre disi (Durum: 0). Abonelik suresi dolmus veya hesap engellenmis olabilir.'
+  } else if (data) {
+    const totalItems = ['live', 'movies', 'series'].reduce(function(sum, kind) {
+      const groups = data[kind] && typeof data[kind] === 'object' ? data[kind] : {}
+      return sum + Object.values(groups).reduce(function(s, arr) {
+        return s + (Array.isArray(arr) ? arr.length : 0)
+      }, 0)
+    }, 0)
+    if (totalItems === 0 && (playlist.type === 'stalker' || playlist.type === 'xtream' || playlist.type === 'm3u')) {
+      syncWarning = 'Sync tamamlandi ancak 0 kanal/icerik alindi. Portal cevap vermiyor veya abonelik bitmiş olabilir.'
+    }
+  }
+
   const nextMeta = mergePlaylistMeta(playlist.meta, Object.assign({}, remoteMeta, {
-    lastSyncedAt: syncStamp,
+    lastSyncedAt: syncWarning ? undefined : syncStamp,
     lastSyncAttemptAt: syncStamp,
-    lastSyncError: ''
+    lastSyncError: syncWarning
   }))
   const updatedPlaylist = await updatePlaylist(playlist.id, { data: data, meta: nextMeta })
   playlist.data = updatedPlaylist.data

@@ -288,7 +288,8 @@ async function handleListAction(event) {
       })
       Object.assign(playlist, updatedPlaylist)
       renderAll()
-      setStatus('Yenilendi: ' + playlist.name)
+      const syncWarn = updatedPlaylist.meta && updatedPlaylist.meta.lastSyncError
+      setStatus(syncWarn ? ('⚠ Uyari: ' + syncWarn) : ('Yenilendi: ' + playlist.name))
     } catch (error) {
       setStatus('Yenileme hatasi: ' + error.message)
     } finally {
