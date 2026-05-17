@@ -37,6 +37,15 @@
   .count-badge { color: #666; font-size: 0.85rem; }
   .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #444; border-top-color: #f00; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 9999; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(3px); }
+  .modal-box { background: #1a1a1a; border: 1px solid #444; border-radius: 12px; padding: 24px 28px; min-width: 300px; max-width: 460px; width: 90vw; box-shadow: 0 8px 40px rgba(0,0,0,0.8); }
+  .modal-msg { color: #e0e0e0; font-size: 14px; line-height: 1.55; margin-bottom: 20px; }
+  .modal-btns { display: flex; justify-content: flex-end; gap: 8px; }
+  .modal-btn { padding: 7px 16px; border-radius: 7px; border: none; cursor: pointer; font-size: 13px; font-weight: 600; }
+  .modal-btn-ok { background: #cc0000; color: #fff; }
+  .modal-btn-ok:hover { background: #e00; }
+  .modal-btn-cancel { background: #333; color: #ccc; }
+  .modal-btn-cancel:hover { background: #555; }
 </style>
 </head>
 <body>
@@ -66,8 +75,46 @@
   <div class="empty">Yükleniyor... <span class="spinner"></span></div>
 </div>
 
+<div class="modal-overlay" id="modalOverlay" style="display:none">
+  <div class="modal-box">
+    <div class="modal-msg" id="modalMsg"></div>
+    <div class="modal-btns" id="modalBtns"></div>
+  </div>
+</div>
+
 <script>
 const BASE = window.location.origin;
+
+function showAlert(msg) {
+  return new Promise(function(resolve) {
+    var overlay = document.getElementById('modalOverlay');
+    document.getElementById('modalMsg').textContent = msg;
+    var btns = document.getElementById('modalBtns');
+    btns.innerHTML = '';
+    var ok = document.createElement('button');
+    ok.className = 'modal-btn modal-btn-ok'; ok.textContent = 'Tamam';
+    ok.onclick = function() { overlay.style.display = 'none'; resolve(); };
+    btns.appendChild(ok);
+    overlay.style.display = 'flex';
+  });
+}
+
+function showConfirm(msg) {
+  return new Promise(function(resolve) {
+    var overlay = document.getElementById('modalOverlay');
+    document.getElementById('modalMsg').textContent = msg;
+    var btns = document.getElementById('modalBtns');
+    btns.innerHTML = '';
+    var cancel = document.createElement('button');
+    cancel.className = 'modal-btn modal-btn-cancel'; cancel.textContent = 'İptal';
+    cancel.onclick = function() { overlay.style.display = 'none'; resolve(false); };
+    var ok = document.createElement('button');
+    ok.className = 'modal-btn modal-btn-ok'; ok.textContent = 'Evet, Sil';
+    ok.onclick = function() { overlay.style.display = 'none'; resolve(true); };
+    btns.appendChild(cancel); btns.appendChild(ok);
+    overlay.style.display = 'flex';
+  });
+}
 
 async function loadChannels() {
   try {
@@ -144,11 +191,11 @@ async function addChannel() {
 }
 
 async function deleteChannel(id) {
-  if (!confirm('Bu kanalı silmek istiyor musunuz?')) return;
+  if (!await showConfirm('Bu kanalı silmek istiyor musunuz?')) return;
   try {
     await fetch('/api/yt-channels/' + encodeURIComponent(id), { method: 'DELETE' });
     loadChannels();
-  } catch (e) { alert('Silme hatası: ' + e.message); }
+  } catch (e) { await showAlert('Silme hatası: ' + e.message); }
 }
 
 function testProxy(id) {
@@ -168,7 +215,7 @@ async function downloadM3U() {
     const r = await fetch('/api/yt-channels');
     const data = await r.json();
     const channels = data.channels || [];
-    if (!channels.length) { alert('Kanal yok.'); return; }
+    if (!channels.length) { await showAlert('Kanal yok.'); return; }
     let m3u = '#EXTM3U\n';
     channels.forEach(ch => {
       m3u += '#EXTINF:-1 tvg-id="yt-' + ch.id + '" group-title="YouTube Proxy",' + (ch.title || ch.url) + '\n';
@@ -179,7 +226,7 @@ async function downloadM3U() {
     a.href = URL.createObjectURL(blob);
     a.download = 'yt-channels.m3u';
     a.click();
-  } catch (e) { alert('Hata: ' + e.message); }
+  } catch (e) { await showAlert('Hata: ' + e.message); }
 }
 
 function esc(s) {

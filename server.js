@@ -587,6 +587,11 @@ app.use(express.static(PUBLIC_DIR, { setHeaders: setPublicStaticHeaders }));
 // Optional convenience: allow /public/* URLs to serve the same static files.
 app.use('/public', express.static(PUBLIC_DIR, { setHeaders: setPublicStaticHeaders }));
 
+// Suppress browser PWA manifest 404 noise
+app.get('/manifest.json', function(req, res) {
+  res.json({ name: 'IPTV Manager', short_name: 'IPTV', start_url: '/', display: 'standalone', background_color: '#0a1628', theme_color: '#0a1628' });
+});
+
 // Frontend SPA routes — serve HTML files for extensionless paths
 app.get('/yt-channels', function(req, res) {
   res.sendFile(path.join(PUBLIC_DIR, 'yt-channels.html'));
