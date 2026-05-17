@@ -423,6 +423,14 @@ export function formatPlaylistExpiry(meta) {
   return 'Belirsiz'
 }
 
+export function isPlaylistExpired(meta) {
+  const normalized = normalizePlaylistMeta(meta)
+  if (!normalized.expireAt) return false
+  const ms = new Date(normalized.expireAt).getTime()
+  if (!ms || isNaN(ms)) return false
+  return Date.now() > ms
+}
+
 export function getSyncIntervalMs(meta) {
   return Math.max(0, Number((meta || {}).syncIntervalMs) || 0)
 }

@@ -11,6 +11,7 @@ import {
   escapeHtml,
   buildM3uLink,
   formatPlaylistExpiry,
+  isPlaylistExpired,
   formatSyncIntervalLabel,
   formatLastSyncText,
   formatNextSyncText,
@@ -115,17 +116,24 @@ function renderRecentLists(items) {
         ? '<div class="list-mini-line list-mini-alert"><span>Hata</span>' + escapeHtml(pl.meta.lastSyncError) + '</div>'
         : ''
       var cnt = countChannels(pl)
+      var expired = isPlaylistExpired(pl.meta)
+      var expiredBadge = expired
+        ? '<span class="list-mini-expired-badge">&#9888; Sure Doldu</span>'
+        : ''
+      var expiryLineClass = expired ? ' list-mini-line--expired' : ''
+      var itemClass = expired ? ' list-mini-item--expired' : ''
 
       return (
-        '<div class="list-mini-item">' +
+        '<div class="list-mini-item' + itemClass + '">' +
           '<div class="list-mini-copy">' +
             '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">' +
               '<div class="list-mini-title">' + escapeHtml(pl.name) + '</div>' +
               getPublishedBadge(pl) +
+              expiredBadge +
             '</div>' +
             '<div class="list-mini-meta">' + cnt + ' icerik</div>' +
             '<div class="list-mini-lines">' +
-              '<div class="list-mini-line"><span>Bitis</span>' + escapeHtml(formatPlaylistExpiry(pl.meta)) + '</div>' +
+              '<div class="list-mini-line' + expiryLineClass + '"><span>Bitis</span>' + escapeHtml(formatPlaylistExpiry(pl.meta)) + '</div>' +
               '<div class="list-mini-line"><span>Oto sync</span>' + escapeHtml(formatSyncIntervalLabel(pl.meta && pl.meta.syncIntervalMs)) + '</div>' +
               '<div class="list-mini-line"><span>Son sync</span>' + escapeHtml(formatLastSyncText(pl)) + '</div>' +
               '<div class="list-mini-line"><span>Sonraki</span>' + escapeHtml(formatNextSyncText(pl)) + '</div>' +
