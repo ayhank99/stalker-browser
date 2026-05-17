@@ -22,7 +22,8 @@ import {
   formatSyncIntervalLabel,
   SYNC_INTERVAL_OPTIONS,
   updatePlaylistSyncInterval,
-  startAutoSync
+  startAutoSync,
+  showConfirm
 } from './app-core.js'
 
 let playlists = []
@@ -262,7 +263,7 @@ async function handleListAction(event) {
   if (!playlist) return
 
   if (action === 'delete') {
-    if (!window.confirm('Bu listeyi silmek istiyor musunuz?')) return
+    if (!await showConfirm('Bu listeyi silmek istiyor musunuz?')) return
     try {
       await deletePlaylist(id)
       playlists = playlists.filter(function(pl) { return pl.id !== id })

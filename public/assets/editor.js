@@ -2,7 +2,9 @@ import {
   byId,
   initShell,
   loadPlaylists,
-  setStatus
+  setStatus,
+  showConfirm,
+  showPrompt
 } from './app-core.js'
 import {
   EditorStore,
@@ -93,8 +95,8 @@ function renderSidebarPanels() {
   renderSelectionPanels()
 }
 
-function confirmLeaveDirtyState() {
-  return !store.editorDirty || window.confirm('Kaydedilmemis degisiklikler var. Devam edersen taslak kaybolacak. Devam etmek istiyor musun?')
+async function confirmLeaveDirtyState() {
+  return !store.editorDirty || await showConfirm('Kaydedilmemis degisiklikler var. Devam edersen taslak kaybolacak. Devam etmek istiyor musun?')
 }
 
 function focusSoon(selector) {
@@ -124,8 +126,8 @@ async function saveCurrentPlaylist(message) {
   }
 }
 
-function selectPlaylist(id, skipConfirm) {
-  if (!skipConfirm && !confirmLeaveDirtyState()) return
+async function selectPlaylist(id, skipConfirm) {
+  if (!skipConfirm && !await confirmLeaveDirtyState()) return
   if (store.selectPlaylist(id)) {
     renderAll()
     setEditorStatus('', 'muted')
@@ -136,7 +138,7 @@ async function sendSelectionToCurated(openTarget, publishTarget) {
   try {
     let targetId = refs.targetSelect.value
     if (!targetId && !store.getPreferredCuratedPlaylist()) {
-      const name = window.prompt('Kurgu playlist adi', 'Benim Playlistim')
+      const name = await showPrompt('Kurgu playlist adi', 'Benim Playlistim')
       if (!name) return
       const created = await store.createCuratedPlaylist(name)
       targetId = created.id
@@ -185,10 +187,10 @@ async function publishCurrentToTv() {
   }
 }
 
-function handleAddCategory() {
+async function handleAddCategory() {
   const playlist = store.currentPlaylist()
   if (!playlist) return
-  const nextName = window.prompt('Yeni kategori adi', '')
+  const nextName = await showPrompt('Yeni kategori adi', '')
   if (!nextName) return
 
   try {
@@ -204,10 +206,10 @@ function handleAddCategory() {
   }
 }
 
-function handleDeleteSelectedRows() {
+async function handleDeleteSelectedRows() {
   const rows = store.selectedRows()
   if (!rows.length) return
-  if (!window.confirm(rows.length + ' kanali silmek istiyor musunuz?')) return
+  if (!await showConfirm(rows.length + ' kanali silmek istiyor musunuz?')) return
   const removed = store.deleteSelectedRows()
   if (!removed) return
   renderAll()
@@ -215,10 +217,10 @@ function handleDeleteSelectedRows() {
   setStatus(removed + ' kanal silindi')
 }
 
-function handleDeleteTargetCategories() {
+async function handleDeleteTargetCategories() {
   const targets = store.effectiveCategoryTargets()
   if (!targets.length) return
-  if (!window.confirm(targets.length + ' kategori ve altindaki tum kanallar silinecek. Devam edilsin mi?')) return
+  if (!await showConfirm(targets.length + ' kategori ve altindaki tum kanallar silinecek. Devam edilsin mi?')) return
   const removed = store.deleteTargetCategories()
   if (!removed) return
   renderAll()
@@ -284,7 +286,7 @@ async function handleInspectorAction(event) {
   }
 
   if (action === 'create-category') {
-    handleAddCategory()
+    await handleAddCategory()
     return
   }
 
@@ -319,7 +321,7 @@ async function handleInspectorAction(event) {
   }
 
   if (action === 'delete-category' || action === 'delete-selected-categories') {
-    handleDeleteTargetCategories()
+    await handleDeleteTargetCategories()
     return
   }
 
@@ -403,11 +405,11 @@ async function handleInspectorAction(event) {
   }
 
   if (action === 'delete-selected-rows' || action === 'delete-active-row') {
-    handleDeleteSelectedRows()
+    await handleDeleteSelectedRows()
   }
 }
 
-function handleRowMenuAction(action) {
+async function handleRowMenuAction(action) {
   const row = store.editorRows[actionMenuState ? Number(actionMenuState.index) : -1]
   if (!row) return
 
@@ -438,11 +440,11 @@ function handleRowMenuAction(action) {
 
   if (action === 'delete-row') {
     store.setSingleRowSelection(row, false)
-    handleDeleteSelectedRows()
+    await handleDeleteSelectedRows()
   }
 }
 
-function handleCategoryMenuAction(action) {
+async function handleCategoryMenuAction(action) {
   if (!actionMenuState) return
   const state = actionMenuState
 
@@ -492,7 +494,7 @@ function handleCategoryMenuAction(action) {
     store.clearCategorySelection()
     store.toggleCategorySelection(state.kind, state.group, true)
     store.setActiveCategory(state.kind, state.group)
-    handleDeleteTargetCategories()
+    await handleDeleteTargetCategories()
   }
 }
 
@@ -509,7 +511,7 @@ function handleActionMenuClick(event) {
   }
 }
 
-function handleBulkbarClick(event) {
+async function handleBulkbarClick(event) {
   const action = event.target.getAttribute('data-bulk-action')
   if (!action) return
 
@@ -529,7 +531,7 @@ function handleBulkbarClick(event) {
   }
 
   if (action === 'delete-rows') {
-    handleDeleteSelectedRows()
+    await handleDeleteSelectedRows()
     return
   }
 
@@ -550,7 +552,7 @@ function handleBulkbarClick(event) {
   }
 
   if (action === 'delete-categories') {
-    handleDeleteTargetCategories()
+    await handleDeleteTargetCategories()
     return
   }
 
@@ -810,10 +812,10 @@ async function bootstrap() {
   initShell('editor')
   setStatus('Editor yukleniyor...')
 
-  refs.playlistList.addEventListener('click', (event) => {
+  refs.playlistList.addEventListener('click', async (event) => {
     const button = event.target.closest('button[data-playlist-id]')
     if (!button) return
-    selectPlaylist(button.getAttribute('data-playlist-id'))
+    await selectPlaylist(button.getAttribute('data-playlist-id'))
   })
 
   refs.categoryTree.addEventListener('click', handleCategoryTreeClick)
@@ -850,13 +852,13 @@ async function bootstrap() {
     renderer.renderToolbar(store)
   })
   refs.createCuratedButton.addEventListener('click', async () => {
-    const name = window.prompt('Yeni kurgu playlist adi', 'Benim Playlistim')
+    const name = await showPrompt('Yeni kurgu playlist adi', 'Benim Playlistim')
     if (!name) return
     try {
       const created = await store.createCuratedPlaylist(name)
       renderAll()
-      if (confirmLeaveDirtyState()) {
-        selectPlaylist(created.id, true)
+      if (await confirmLeaveDirtyState()) {
+        await selectPlaylist(created.id, true)
         setStatus('Kurgu playlist olusturuldu ve acildi: ' + String(created.name || '').trim())
       } else {
         setStatus('Kurgu playlist olusturuldu: ' + String(created.name || '').trim() + '. Soldaki listeden acabilirsin.')

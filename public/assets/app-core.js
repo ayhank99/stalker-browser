@@ -1140,6 +1140,98 @@ export async function saveServerConfig(username, password) {
   return api('/api/server-config', { username: username, password: password })
 }
 
+export function showConfirm(message) {
+  return new Promise(function(resolve) {
+    var overlay = document.createElement('div')
+    overlay.className = 'modal-overlay'
+    var box = document.createElement('div')
+    box.className = 'modal-box'
+    var msg = document.createElement('div')
+    msg.className = 'modal-message'
+    msg.textContent = message
+    var actions = document.createElement('div')
+    actions.className = 'modal-actions'
+    var cancelBtn = document.createElement('button')
+    cancelBtn.className = 'modal-btn modal-btn-secondary'
+    cancelBtn.textContent = 'İptal'
+    var okBtn = document.createElement('button')
+    okBtn.className = 'modal-btn modal-btn-primary'
+    okBtn.textContent = 'Tamam'
+    actions.appendChild(cancelBtn)
+    actions.appendChild(okBtn)
+    box.appendChild(msg)
+    box.appendChild(actions)
+    overlay.appendChild(box)
+
+    function close(result) {
+      document.removeEventListener('keydown', keyHandler)
+      overlay.remove()
+      resolve(result)
+    }
+
+    function keyHandler(e) {
+      if (e.key === 'Enter') { e.preventDefault(); close(true) }
+      if (e.key === 'Escape') { e.preventDefault(); close(false) }
+    }
+
+    okBtn.addEventListener('click', function() { close(true) })
+    cancelBtn.addEventListener('click', function() { close(false) })
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) close(false) })
+    document.addEventListener('keydown', keyHandler)
+    document.body.appendChild(overlay)
+    okBtn.focus()
+  })
+}
+
+export function showPrompt(message, defaultValue) {
+  return new Promise(function(resolve) {
+    var overlay = document.createElement('div')
+    overlay.className = 'modal-overlay'
+    var box = document.createElement('div')
+    box.className = 'modal-box'
+    var msg = document.createElement('div')
+    msg.className = 'modal-message'
+    msg.textContent = message
+    var input = document.createElement('input')
+    input.type = 'text'
+    input.className = 'modal-input'
+    input.value = defaultValue || ''
+    var actions = document.createElement('div')
+    actions.className = 'modal-actions'
+    var cancelBtn = document.createElement('button')
+    cancelBtn.className = 'modal-btn modal-btn-secondary'
+    cancelBtn.textContent = 'İptal'
+    var okBtn = document.createElement('button')
+    okBtn.className = 'modal-btn modal-btn-primary'
+    okBtn.textContent = 'Tamam'
+    actions.appendChild(cancelBtn)
+    actions.appendChild(okBtn)
+    box.appendChild(msg)
+    box.appendChild(input)
+    box.appendChild(actions)
+    overlay.appendChild(box)
+
+    function close(cancelled) {
+      document.removeEventListener('keydown', keyHandler)
+      overlay.remove()
+      resolve(cancelled ? null : (input.value.trim() || null))
+    }
+
+    function keyHandler(e) {
+      if (e.key === 'Escape') { e.preventDefault(); close(true) }
+    }
+
+    okBtn.addEventListener('click', function() { close(false) })
+    cancelBtn.addEventListener('click', function() { close(true) })
+    input.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); close(false) } })
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) close(true) })
+    document.addEventListener('keydown', keyHandler)
+    document.body.appendChild(overlay)
+    input.focus()
+    input.select()
+  })
+}
+
 export function buildTvBaseUrl(info) {
   if (!info) return ''
   if (info.separatePort === false) return window.location.origin

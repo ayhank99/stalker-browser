@@ -1711,3 +1711,96 @@ td input {
     width: 100%;
   }
 }
+
+/* ── Custom Modal ─────────────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  backdrop-filter: blur(3px);
+  animation: modal-fade-in 0.12s ease;
+}
+
+@keyframes modal-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.modal-box {
+  background: #0c1929;
+  border: 1px solid rgba(63, 109, 167, 0.45);
+  border-radius: 14px;
+  padding: 24px 26px 20px;
+  min-width: 300px;
+  max-width: 420px;
+  width: 90%;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: modal-slide-in 0.14s ease;
+}
+
+@keyframes modal-slide-in {
+  from { transform: translateY(-10px); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
+}
+
+.modal-message {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.modal-input {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(63, 109, 167, 0.4);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 8px 12px;
+  width: 100%;
+  box-sizing: border-box;
+  outline: none;
+  font-family: inherit;
+}
+
+.modal-input:focus {
+  border-color: rgba(63, 109, 167, 0.85);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.modal-btn {
+  padding: 7px 20px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  font-family: inherit;
+  transition: opacity 0.15s, transform 0.1s;
+}
+
+.modal-btn:hover  { opacity: 0.85; }
+.modal-btn:active { transform: scale(0.97); }
+
+.modal-btn-primary {
+  background: #2d6db5;
+  color: #fff;
+}
+
+.modal-btn-secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--soft);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
