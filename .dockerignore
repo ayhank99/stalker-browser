@@ -11,6 +11,10 @@ desktop
 windows-desktop
 docs
 .vercel
+.claude
+.vscode
+.tmp
+_youtube_zip
 *.log
 *.zip
 *.tar.gz

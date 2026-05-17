@@ -10,4 +10,6 @@ services:
       - key: DATA_DIR
         value: /app/data
       - key: XTREAM_PORT
-        value: 3000
+        value: 8080
+      - key: ENABLE_TV_SERVER
+        value: 0

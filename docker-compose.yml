@@ -10,6 +10,7 @@ services:
     environment:
       PORT: "3000"
       XTREAM_PORT: "8080"
+      ENABLE_TV_SERVER: "1"
       DATA_DIR: /app/data
     volumes:
       - ./data:/app/data

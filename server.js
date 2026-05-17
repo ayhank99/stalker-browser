@@ -5666,7 +5666,7 @@ if (require.main === module) {
     var standaloneTvServer = null;
     var standaloneTvServerActive = ENABLE_TV_SERVER;
 
-    if (ENABLE_TV_SERVER) {
+    if (ENABLE_TV_SERVER && XTREAM_PORT !== PORT) {
       standaloneTvServer = xtreamApp.listen(XTREAM_PORT, function () {
         console.log('[TV Sunucu] http://localhost:' + XTREAM_PORT);
       });
@@ -5684,6 +5684,9 @@ if (require.main === module) {
         }
         throw error;
       });
+    } else if (ENABLE_TV_SERVER && XTREAM_PORT === PORT) {
+      standaloneTvServerActive = false;
+      console.warn('[TV]  XTREAM_PORT (' + XTREAM_PORT + ') == PORT (' + PORT + '). Ayrik TV sunucusu atlandi; endpointler web sunucusu uzerinden calismaya devam edecek.');
     }
 
     var webServer = app.listen(PORT, function () {

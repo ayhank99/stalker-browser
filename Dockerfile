@@ -16,6 +16,11 @@ COPY . .
 
 ENV NODE_ENV=production
 ENV DATA_DIR=/app/data
+# Railway gibi tek-port ortamlarinda ayrik TV sunucusu baslatilmaz;
+# xtream endpointleri zaten ana PORT uzerinden de erisilebelir.
+ENV ENABLE_TV_SERVER=0
+
+RUN mkdir -p /app/data
 
 EXPOSE 3000
 
