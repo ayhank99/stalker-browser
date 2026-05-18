@@ -5791,6 +5791,24 @@ function buildYouTubeLiveItem(videoId, title, originalUrl, logo) {
   };
 }
 
+function pickActiveLiveTvPlaylist(playlists) {
+  var available = (playlists || []).filter(function (playlist) {
+    return !!(playlist && playlist.id && playlist.data);
+  });
+  var published = available.filter(isPlaylistPublishedToTv);
+
+  if (published.length) {
+    return published
+      .slice()
+      .sort(function (a, b) {
+        return Date.parse(safeTrim(b && b.meta && b.meta.tvPublishedAt) || safeTrim(b && b.updatedAt) || '') -
+          Date.parse(safeTrim(a && a.meta && a.meta.tvPublishedAt) || safeTrim(a && a.updatedAt) || '');
+      })[0];
+  }
+
+  return null;
+}
+
 async function addYouTubeToLiveTv(options) {
   var url = safeTrim(options && options.url);
   var videoId = ytStream.extractVideoId(url);
@@ -5798,31 +5816,15 @@ async function addYouTubeToLiveTv(options) {
     throw new Error('Gecersiz YouTube linki');
   }
 
-  var playlistName = safeTrim(process.env.YOUTUBE_LIVE_PLAYLIST_NAME) || 'Bizim Kanallar';
   var groupName = safeTrim(process.env.YOUTUBE_LIVE_GROUP_NAME) || 'Bizim Kanallar';
   var title = normalizeYouTubeLiveTitle(options && options.title, videoId);
   var item = buildYouTubeLiveItem(videoId, title, url, options && options.logo);
   var playlists = await loadPlaylists({ force: true });
-  var playlist = (playlists || []).find(function (candidate) {
-    return safeTrim(candidate && candidate.name).toLowerCase() === playlistName.toLowerCase() &&
-      isCuratedOutputPlaylist(candidate);
-  });
+  var playlist = pickActiveLiveTvPlaylist(playlists);
   var now = new Date().toISOString();
 
   if (!playlist) {
-    playlist = {
-      id: randomUUID(),
-      name: playlistName,
-      type: 'custom',
-      data: { live: {}, movies: {}, series: {} },
-      meta: {
-        playlistBucket: 'curated',
-        tvPublished: true,
-        tvPublishedAt: now
-      },
-      createdAt: now,
-      updatedAt: now
-    };
+    throw new Error('Aktif TV playlisti bulunamadi. Once Editor icinden hedef playlisti TV’ye yayinla.');
   }
 
   playlist.data = playlist.data || { live: {}, movies: {}, series: {} };
@@ -5850,15 +5852,13 @@ async function addYouTubeToLiveTv(options) {
   });
   playlist.updatedAt = now;
 
-  var saved = await (playlist.createdAt === now
-    ? createPlaylistRecord(playlist)
-    : updatePlaylistRecord(playlist.id, {
-        name: playlist.name,
-        type: playlist.type,
-        data: playlist.data,
-        meta: playlist.meta,
-        updatedAt: playlist.updatedAt
-      }));
+  var saved = await updatePlaylistRecord(playlist.id, {
+    name: playlist.name,
+    type: playlist.type,
+    data: playlist.data,
+    meta: playlist.meta,
+    updatedAt: playlist.updatedAt
+  });
 
   await ytChannels.addChannel(url || ('https://www.youtube.com/watch?v=' + videoId), videoId, title);
 
