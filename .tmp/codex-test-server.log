@@ -1,0 +1,9 @@
+◇ injected env (1) from .env.local // tip: ⌘ override existing { override: true }
+◇ injected env (5) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+[TV Sunucu] http://localhost:8090
+[Build] compat-bypass-active 2026-04-09
+[Web] http://localhost:3100
+[TV]  http://localhost:8090
+[YouTube Proxy] http://127.0.0.1:5000
+[Health] http://127.0.0.1:3100/api/health
+[YouTube Proxy] port 5000 zaten kullanimda. Proxy zaten acik olabilir; atlaniyor.

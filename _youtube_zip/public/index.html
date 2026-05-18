@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>YouTube Proxy Player</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <h1>YouTube Proxy Player</h1>
+
+    <form id="video-form" autocomplete="off" spellcheck="false">
+      <input
+        id="input-url"
+        type="text"
+        placeholder="Enter YouTube URL or Video ID"
+        aria-label="YouTube URL or Video ID"
+        required
+      />
+      <button type="submit">Load</button>
+    </form>
+
+    <section id="video-info" aria-live="polite" hidden>
+      <h2 id="title"></h2>
+      <p><strong>Uploader:</strong> <span id="uploader"></span></p>
+      <p><strong>Duration:</strong> <span id="duration"></span></p>
+    </section>
+
+    <div id="player-container" hidden>
+      <div id="badge">kaynak gizli</div>
+      <video id="video" controls crossorigin="anonymous" preload="metadata"></video>
+
+      <div id="controls">
+        <button id="play-pause" aria-label="Play/Pause">▶️</button>
+        <input type="range" id="seek-bar" min="0" max="100" value="0" aria-label="Seek bar" />
+        <button id="skip-back" aria-label="Skip back 10 seconds">⏪ 10s</button>
+        <button id="skip-forward" aria-label="Skip forward 10 seconds">10s ⏩</button>
+        <input type="range" id="volume-bar" min="0" max="1" step="0.01" value="1" aria-label="Volume control" />
+        <button id="fullscreen" aria-label="Fullscreen">⛶</button>
+      </div>
+    </div>
+
+    <div id="error-message" role="alert" hidden></div>
+  </main>
+
+  <script src="player.js"></script>
+</body>
+</html>

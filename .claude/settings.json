@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git commit -m ' *)",
+      "Bash(node -e \"const cp = require\\('child_process'\\); cp.exec\\('where yt-dlp', \\(e,out\\) => console.log\\('where:', out.trim\\(\\)\\)\\); cp.exec\\('yt-dlp --version', \\(e,out\\) => console.log\\('version:', out.trim\\(\\)\\)\\);\")",
+      "Bash(node -e ' *)",
+      "Bash(node -e \"const cp = require\\('child_process'\\); cp.exec\\('yt-dlp --version', \\(e,o\\) => console.log\\('yt-dlp:', o.trim\\(\\)\\)\\);\")"
+    ]
+  }
+}

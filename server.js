@@ -3143,8 +3143,30 @@ async function resolveYouTubeStream(item) {
     console.warn('[YouTube] unified resolver hata:', (unifiedError && unifiedError.message || '').substring(0, 160));
   }
 
-  // ADIM 1: yt-dlp (lokal — en güvenilir, live HLS döndürür)
-  if (!process.env.VERCEL) {
+  // Railway/Heroku gibi sunucu ortamlarında InnerTube API'yi önceliklendir
+  var isServerEnv = !!(
+    process.env.RAILWAY_ENVIRONMENT ||
+    process.env.RAILWAY_STATIC_URL ||
+    process.env.RENDER ||
+    process.env.HEROKU_APP_NAME ||
+    process.env.FLY_APP_NAME
+  );
+
+  // ADIM 1: InnerTube API (Railway'de en güvenilir)
+  if (isServerEnv) {
+    try {
+      var itResult = await resolveViaInnerTube(videoId);
+      if (itResult && itResult.streamUrl) {
+        console.log('[YouTube] InnerTube OK (server):', itResult.kind, itResult.streamUrl.substring(0, 60));
+        return { streamUrl: itResult.streamUrl, isHls: itResult.isHls, videoId: videoId, playerMode: 'hls', kind: itResult.kind, playbackHeaders: {} };
+      }
+    } catch (ite) {
+      console.warn('[YouTube] InnerTube hata:', (ite && ite.message || '').substring(0, 80));
+    }
+  }
+
+  // ADIM 2: yt-dlp (lokal — en güvenilir, live HLS döndürür)
+  if (!process.env.VERCEL && !isServerEnv) {
     try {
       var ytCmd = resolveYouTubeCommand();
       if (ytCmd) {
@@ -3182,18 +3204,20 @@ async function resolveYouTubeStream(item) {
     }
   }
 
-  // ADIM 2: InnerTube API (iOS client — Vercel'de de calisir, cipher yok)
-  try {
-    var itResult = await resolveViaInnerTube(videoId);
-    if (itResult && itResult.streamUrl) {
-      console.log('[YouTube] InnerTube OK:', itResult.kind, itResult.streamUrl.substring(0, 60));
-      return { streamUrl: itResult.streamUrl, isHls: itResult.isHls, videoId: videoId, playerMode: 'hls', kind: itResult.kind, playbackHeaders: {} };
+  // ADIM 3: InnerTube API (lokal ortamlar için fallback)
+  if (!isServerEnv) {
+    try {
+      var itResult = await resolveViaInnerTube(videoId);
+      if (itResult && itResult.streamUrl) {
+        console.log('[YouTube] InnerTube OK:', itResult.kind, itResult.streamUrl.substring(0, 60));
+        return { streamUrl: itResult.streamUrl, isHls: itResult.isHls, videoId: videoId, playerMode: 'hls', kind: itResult.kind, playbackHeaders: {} };
+      }
+    } catch (ite) {
+      console.warn('[YouTube] InnerTube hata:', (ite && ite.message || '').substring(0, 80));
     }
-  } catch (ite) {
-    console.warn('[YouTube] InnerTube hata:', (ite && ite.message || '').substring(0, 80));
   }
 
-  // ADIM 3: @ybd-project/ytdl-core combined format (ikinci fallback)
+  // ADIM 4: @ybd-project/ytdl-core combined format (üçüncü fallback)
   try {
     var ytdlMod = require('@ybd-project/ytdl-core');
     var YtdlCore = ytdlMod.YtdlCore || ytdlMod.default;
@@ -3241,7 +3265,7 @@ async function resolveYouTubeStream(item) {
     console.warn('[YouTube] ytdl-core hata:', e.message.substring(0, 60));
   }
 
-  // ADIM 4: Piped API
+  // ADIM 5: Piped API
   try {
     var piped = await getPipedStreamInfo(videoId);
     if (piped && (piped.hlsUrl || piped.streamUrl)) {
@@ -3254,7 +3278,7 @@ async function resolveYouTubeStream(item) {
     console.warn('[YouTube] Piped hata:', (pe && pe.message || '').substring(0, 60));
   }
 
-  // ADIM 5: Invidious API
+  // ADIM 6: Invidious API
   try {
     var inv = await resolveViaInvidious(videoId);
     if (inv && inv.streamUrl) {
@@ -3265,7 +3289,42 @@ async function resolveYouTubeStream(item) {
     console.warn('[YouTube] Invidious hata:', (inve && inve.message || '').substring(0, 60));
   }
 
-  // ADIM 6: iframe fallback (sadece webplayer)
+  // ADIM 7: Railway için özel Invidious proxy fallback
+  if (isServerEnv) {
+    console.log('[YouTube] Railway ortami - Invidious proxy deneniyor:', videoId);
+    var invInstances = [
+      'https://inv.nadeko.net',
+      'https://invidious.io.lol',
+      'https://invidious.ducks.party',
+      'https://iv.datura.network',
+      'https://invidious.privacyredirect.com'
+    ];
+    
+    // Hızlı health check ile çalışan instance bul
+    for (var i = 0; i < invInstances.length; i++) {
+      try {
+        var testUrl = invInstances[i] + '/api/v1/videos/' + videoId + '?fields=formatStreams';
+        var testRes = await fetch(testUrl, { timeout: 3000 });
+        if (testRes.ok) {
+          var invProxyUrl = invInstances[i] + '/latest_version?id=' + videoId + '&itag=22&local=true';
+          console.log('[YouTube] Invidious proxy OK:', invInstances[i]);
+          return { 
+            streamUrl: invProxyUrl, 
+            isHls: false, 
+            videoId: videoId, 
+            playerMode: 'hls', 
+            kind: 'mp4', 
+            playbackHeaders: {},
+            forceCompatibilityProxy: true
+          };
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+  }
+
+  // ADIM 8: iframe fallback (sadece webplayer)
   console.warn('[YouTube] Tum yontemler basarisiz, iframe fallback:', videoId);
   return { streamUrl: null, hlsUrl: null, videoId: videoId, playerMode: 'iframe', kind: 'iframe', playbackHeaders: {} };
 }
