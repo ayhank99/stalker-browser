@@ -229,7 +229,10 @@ async function deleteChannel(id) {
 }
 
 function testProxy(id) {
-  window.open(BASE + '/proxy/' + id, '_blank');
+  const ch = window.__ytChannelMap && window.__ytChannelMap[id];
+  const name = ch ? (ch.title || ch.url || id) : id;
+  const rawUrl = BASE + '/proxy/' + id + '?raw=1';
+  window.open(BASE + '/player.html?url=' + encodeURIComponent(rawUrl) + '&name=' + encodeURIComponent(name), '_blank');
 }
 
 function copyText(text, btn) {

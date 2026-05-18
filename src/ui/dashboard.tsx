@@ -35,7 +35,10 @@ interface PlaylistSummary {
 
 interface YtChannel {
   id: string;
-  name: string;
+  name?: string;
+  title?: string;
+  url?: string;
+  videoId?: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -70,6 +73,10 @@ function totalCounts(playlists: PlaylistSummary[]) {
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
+
+function ytChannelLabel(channel: YtChannel): string {
+  return channel.title || channel.name || channel.url || channel.videoId || channel.id || 'YouTube kanal';
+}
 
 function StatCard({ label, value, sub, color }: { label: string; value: string | number; sub?: string; color?: string }) {
   return (
@@ -385,10 +392,10 @@ export default function DashboardPage() {
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
               {ytChannels.slice(0, 8).map(ch => (
-                <div key={ch.id} style={{ fontSize: 13, padding: '5px 8px', background: 'rgba(248,113,113,0.06)', borderRadius: 6, border: '1px solid rgba(248,113,113,0.15)' }}>
+                <a key={ch.id} href="/yt-channels.html" style={{ fontSize: 13, padding: '5px 8px', background: 'rgba(248,113,113,0.06)', borderRadius: 6, border: '1px solid rgba(248,113,113,0.15)', textDecoration: 'none', display: 'block' }}>
                   <span style={{ color: '#f87171', fontWeight: 600 }}>▶</span>{' '}
-                  <span style={{ color: '#f9fafb' }}>{ch.name}</span>
-                </div>
+                  <span style={{ color: '#f9fafb' }}>{ytChannelLabel(ch)}</span>
+                </a>
               ))}
               {ytChannels.length > 8 && (
                 <div style={{ fontSize: 12, color: '#6b7280', textAlign: 'center', padding: '4px 0' }}>

@@ -1651,8 +1651,14 @@ function setNodeResponseProxyHeaders(res, headers) {
   setCommonProxyHeaders(res);
 }
 
+function firstHeaderValue(value) {
+  return String(Array.isArray(value) ? value[0] : (value || '')).split(',')[0].trim();
+}
+
 function buildRuntimeBaseUrl(req) {
-  return req.protocol + '://' + req.get('host');
+  var proto = firstHeaderValue(req.headers && req.headers['x-forwarded-proto']) || req.protocol || (req.secure ? 'https' : 'http');
+  var host = firstHeaderValue(req.headers && req.headers['x-forwarded-host']) || req.get('host');
+  return proto + '://' + host;
 }
 
 function buildInternalAppBaseUrl() {
@@ -2336,10 +2342,6 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
     setCommonProxyHeaders(res);
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Content-Type', 'video/mp2t');
-    res.status(200);
-    if (typeof res.flushHeaders === 'function') {
-      res.flushHeaders();
-    }
 
     var startupTimer = setTimeout(function () {
       if (!started && !finished) {
@@ -2361,6 +2363,10 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
       started = true;
       clearTimeout(startupTimer);
       console.log('[YouTube][TS] first byte after ms:', Date.now() - startedAt);
+      res.status(200);
+      if (typeof res.flushHeaders === 'function') {
+        res.flushHeaders();
+      }
       res.write(chunk);
       ffmpegProcess.stdout.pipe(res);
     });
@@ -3504,7 +3510,7 @@ async function resolveYouTubeStream(item) {
 }
 
 function getServerBaseUrl(req) {
-  return req.protocol + '://' + req.get('host');
+  return buildRuntimeBaseUrl(req);
 }
 
 function streamExtension(kind, item) {
@@ -5898,6 +5904,15 @@ function decodeProxySegmentParam(value) {
   }
 }
 
+function isBrowserDocumentRequest(req) {
+  var accept = String(req.headers.accept || '').toLowerCase();
+  var fetchDest = String(req.headers['sec-fetch-dest'] || '').toLowerCase();
+  var mode = String(req.headers['sec-fetch-mode'] || '').toLowerCase();
+  return accept.indexOf('text/html') !== -1 ||
+    fetchDest === 'document' ||
+    mode === 'navigate';
+}
+
 async function resolveYouTubeProxyVideoId(proxyId) {
   var id = safeTrim(proxyId);
   var directVideoId = ytStream.extractVideoId(id);
@@ -5937,6 +5952,14 @@ async function handleYouTubeProxyRoute(req, res) {
     return res.status(404).send('Kanal bulunamadi');
   }
 
+  if (isBrowserDocumentRequest(req) && safeTrim(req.query.raw) !== '1') {
+    var playerUrl = '/player.html?url=' +
+      encodeURIComponent(buildRuntimeBaseUrl(req) + '/proxy/' + encodeURIComponent(req.params.id) + '?raw=1') +
+      '&name=' +
+      encodeURIComponent('YouTube ' + videoId);
+    return res.redirect(302, playerUrl);
+  }
+
   return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
 }
 
@@ -5965,15 +5988,27 @@ function pickActiveLiveTvPlaylist(playlists) {
   var available = (playlists || []).filter(function (playlist) {
     return !!(playlist && playlist.id && playlist.data);
   });
-  var published = available.filter(isPlaylistPublishedToTv);
+  var nonGenerated = available.filter(function (playlist) {
+    return safeTrim(playlist && playlist.name).toLowerCase() !== 'bizim kanallar';
+  });
+  var candidates = nonGenerated.length ? nonGenerated : available;
+  var published = candidates.filter(isPlaylistPublishedToTv);
+  function newestFirst(a, b) {
+    return Date.parse(safeTrim(b && b.meta && b.meta.tvPublishedAt) || safeTrim(b && b.updatedAt) || safeTrim(b && b.createdAt) || '') -
+      Date.parse(safeTrim(a && a.meta && a.meta.tvPublishedAt) || safeTrim(a && a.updatedAt) || safeTrim(a && a.createdAt) || '');
+  }
 
   if (published.length) {
-    return published
-      .slice()
-      .sort(function (a, b) {
-        return Date.parse(safeTrim(b && b.meta && b.meta.tvPublishedAt) || safeTrim(b && b.updatedAt) || '') -
-          Date.parse(safeTrim(a && a.meta && a.meta.tvPublishedAt) || safeTrim(a && a.updatedAt) || '');
-      })[0];
+    return published.slice().sort(newestFirst)[0];
+  }
+
+  var curated = candidates.filter(isCuratedOutputPlaylist);
+  if (curated.length) {
+    return curated.slice().sort(newestFirst)[0];
+  }
+
+  if (candidates.length) {
+    return candidates.slice().sort(newestFirst)[0];
   }
 
   return null;
@@ -5994,7 +6029,7 @@ async function addYouTubeToLiveTv(options) {
   var now = new Date().toISOString();
 
   if (!playlist) {
-    throw new Error('Aktif TV playlisti bulunamadi. Once Editor icinden hedef playlisti TV’ye yayinla.');
+    throw new Error('Kayitli playlist bulunamadi. Once sistemde bir playlist olustur.');
   }
 
   playlist.data = playlist.data || { live: {}, movies: {}, series: {} };

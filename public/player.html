@@ -247,8 +247,8 @@ function resolveExistingProxyRequest(url) {
         requestedUrl: url,
         sourceUrl: url,
         resolvedUrl: url,
-        kind: 'hls',
-        mimeType: 'application/x-mpegURL'
+        kind: 'mpegts',
+        mimeType: 'video/mp2t'
       };
     }
     if (normalizedPath !== '/stream' && normalizedPath !== '/stream/compat') {
