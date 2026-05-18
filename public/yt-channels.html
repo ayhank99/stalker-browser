@@ -60,7 +60,7 @@
   <div class="input-row">
     <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=... veya youtu.be/..." />
     <input type="text" id="titleInput" placeholder="Kanal adı (isteğe bağlı)" style="max-width:220px" />
-    <button onclick="addChannel()">Ekle &amp; Proxy Oluştur</button>
+    <button onclick="addChannel()">Live TV'ye Ekle</button>
   </div>
   <div class="status" id="addStatus"></div>
 </div>
@@ -170,7 +170,7 @@ async function addChannel() {
   const title = document.getElementById('titleInput').value.trim();
   const status = document.getElementById('addStatus');
   if (!url) { status.className = 'status error'; status.textContent = 'YouTube linki gerekli!'; return; }
-  status.className = 'status'; status.innerHTML = 'Ekleniyor... <span class="spinner"></span>';
+  status.className = 'status'; status.innerHTML = 'Live TV listesi hazirlaniyor... <span class="spinner"></span>';
   try {
     const r = await fetch('/api/yt-channels', {
       method: 'POST',
@@ -180,7 +180,7 @@ async function addChannel() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
     status.className = 'status';
-    status.innerHTML = '✓ Eklendi! Proxy URL: <strong>' + esc(BASE + '/proxy/' + data.id) + '</strong>';
+    status.innerHTML = '✓ Live TV’ye eklendi: <strong>' + esc(data.playlistName || 'Bizim Kanallar') + '</strong> / <strong>' + esc(data.groupName || 'Bizim Kanallar') + '</strong><br>Proxy URL: <strong>' + esc(data.proxyUrl || (BASE + '/proxy/' + data.id)) + '</strong>';
     document.getElementById('urlInput').value = '';
     document.getElementById('titleInput').value = '';
     loadChannels();

@@ -18,6 +18,7 @@ var randomUUID = typeof crypto.randomUUID === 'function'
   ? crypto.randomUUID.bind(crypto)
   : function () { return String(Date.now()) + '-' + String(Math.floor(Math.random() * 1000000)); };
 var createStorage = require('./storage').createStorage;
+var ytStream = require('./lib/yt-stream');
 
 var app = express();
 var PORT = Number(process.env.PORT || 3000);
@@ -3102,8 +3103,45 @@ function clearCachedYouTubeEntry(youtubeUrl) {
 
 async function resolveYouTubeStream(item) {
   var url = item.url || item.cmd || item.sourceCmd || '';
-  var videoId = extractYouTubeVideoId(url);
+  var videoId = ytStream.extractVideoId(url);
   if (!videoId) return null;
+
+  try {
+    var skipGoogleCdn = !!(
+      process.env.RAILWAY_ENVIRONMENT ||
+      process.env.RAILWAY_STATIC_URL ||
+      process.env.RAILWAY_SERVICE_ID ||
+      process.env.RENDER ||
+      process.env.HEROKU_APP_NAME ||
+      process.env.FLY_APP_NAME ||
+      process.env.AWS_LAMBDA_FUNCTION_NAME ||
+      process.env.VERCEL
+    );
+    var stream = await ytStream.getStreamUrl(videoId, { skipGoogleCdn: skipGoogleCdn });
+    if ((!stream || !stream.url) && skipGoogleCdn) {
+      stream = await ytStream.getStreamUrl(videoId, { skipGoogleCdn: false });
+    }
+    if (stream && stream.url) {
+      var resolvedKind = stream.isM3U8 ? 'hls' : (stream.kind || inferStreamKind(stream.url, ''));
+      console.log('[YouTube] unified resolver OK:', stream.source || 'unknown', resolvedKind, summarizeStreamUrlForLog(stream.url));
+      return {
+        streamUrl: stream.url,
+        isHls: !!stream.isM3U8,
+        videoId: videoId,
+        playerMode: 'hls',
+        kind: resolvedKind === 'unknown' ? (stream.isM3U8 ? 'hls' : 'mp4') : resolvedKind,
+        playbackHeaders: {
+          'User-Agent': 'Mozilla/5.0',
+          Accept: '*/*'
+        },
+        resolverSource: stream.source || '',
+        resolverAttempts: stream.attempts || []
+      };
+    }
+    console.warn('[YouTube] unified resolver failed:', videoId, stream && (stream.error || JSON.stringify(stream.attempts || [])));
+  } catch (unifiedError) {
+    console.warn('[YouTube] unified resolver hata:', (unifiedError && unifiedError.message || '').substring(0, 160));
+  }
 
   // ADIM 1: yt-dlp (lokal — en güvenilir, live HLS döndürür)
   if (!process.env.VERCEL) {
@@ -3897,7 +3935,7 @@ app.post('/api/resolve', async function (req, res) {
 app.get('/api/youtube/resolve', async function (req, res) {
   res.set('Access-Control-Allow-Origin', '*');
   var url = safeTrim(req.query.url);
-  var videoId = extractYouTubeVideoId(url);
+  var videoId = ytStream.extractVideoId(url);
   if (!videoId) {
     return res.json({ ok: false, error: 'Gecersiz YouTube URL', videoId: null });
   }
@@ -3972,7 +4010,7 @@ app.get('/api/yt', async function (req, res) {
     return res.status(400).json({ error: 'url veya id parametresi gerekli. Ornek: /api/yt?id=dQw4w9wgxcQ' });
   }
 
-  var videoId = extractYouTubeVideoId(rawParam);
+  var videoId = ytStream.extractVideoId(rawParam);
   if (!videoId) {
     return res.status(400).json({ error: 'Gecersiz YouTube URL veya video ID', raw: rawParam });
   }
@@ -5614,7 +5652,6 @@ app.get('/api/yt-info', async function(req, res) {
 // ── YouTube Proxy Channel System ─────────────────────────────────────────────
 
 var ytChannels = require('./lib/yt-channels');
-var ytStream = require('./lib/yt-stream');
 ytChannels.configureStorage(storage);
 
 function decodeProxySegmentParam(value) {
@@ -5672,6 +5709,110 @@ async function handleYouTubeProxyRoute(req, res) {
   }
 
   return deliverResolvedStream(req, res, resolved);
+}
+
+function normalizeYouTubeLiveTitle(title, videoId) {
+  return safeTrim(title) || ('YouTube ' + safeTrim(videoId));
+}
+
+function buildYouTubeLiveItem(videoId, title, originalUrl, logo) {
+  var proxyPath = buildYouTubeProxyPath(videoId);
+  return {
+    id: 'yt_' + videoId,
+    name: normalizeYouTubeLiveTitle(title, videoId),
+    logo: safeTrim(logo),
+    cmd: proxyPath,
+    sourceCmd: proxyPath,
+    sourceType: 'external',
+    sourceMeta: {
+      originalUrl: safeTrim(originalUrl) || ('https://www.youtube.com/watch?v=' + videoId),
+      providerLabel: 'YouTube Live',
+      videoId: videoId
+    }
+  };
+}
+
+async function addYouTubeToLiveTv(options) {
+  var url = safeTrim(options && options.url);
+  var videoId = ytStream.extractVideoId(url);
+  if (!videoId) {
+    throw new Error('Gecersiz YouTube linki');
+  }
+
+  var playlistName = safeTrim(process.env.YOUTUBE_LIVE_PLAYLIST_NAME) || 'Bizim Kanallar';
+  var groupName = safeTrim(process.env.YOUTUBE_LIVE_GROUP_NAME) || 'Bizim Kanallar';
+  var title = normalizeYouTubeLiveTitle(options && options.title, videoId);
+  var item = buildYouTubeLiveItem(videoId, title, url, options && options.logo);
+  var playlists = await loadPlaylists({ force: true });
+  var playlist = (playlists || []).find(function (candidate) {
+    return safeTrim(candidate && candidate.name).toLowerCase() === playlistName.toLowerCase() &&
+      isCuratedOutputPlaylist(candidate);
+  });
+  var now = new Date().toISOString();
+
+  if (!playlist) {
+    playlist = {
+      id: randomUUID(),
+      name: playlistName,
+      type: 'custom',
+      data: { live: {}, movies: {}, series: {} },
+      meta: {
+        playlistBucket: 'curated',
+        tvPublished: true,
+        tvPublishedAt: now
+      },
+      createdAt: now,
+      updatedAt: now
+    };
+  }
+
+  playlist.data = playlist.data || { live: {}, movies: {}, series: {} };
+  playlist.data.live = playlist.data.live || {};
+  playlist.data.movies = playlist.data.movies || {};
+  playlist.data.series = playlist.data.series || {};
+  var groupItems = playlist.data.live[groupName] || [];
+  var existingIndex = groupItems.findIndex(function (candidate) {
+    return safeTrim(candidate && candidate.id) === item.id ||
+      safeTrim(candidate && candidate.sourceMeta && candidate.sourceMeta.videoId) === videoId ||
+      safeTrim(candidate && (candidate.cmd || candidate.sourceCmd)).indexOf('yt_' + videoId) !== -1;
+  });
+
+  if (existingIndex >= 0) {
+    groupItems[existingIndex] = Object.assign({}, groupItems[existingIndex], item);
+  } else {
+    groupItems.push(item);
+  }
+
+  playlist.data.live[groupName] = groupItems;
+  playlist.meta = Object.assign({}, playlist.meta || {}, {
+    playlistBucket: 'curated',
+    tvPublished: true,
+    tvPublishedAt: (playlist.meta && playlist.meta.tvPublishedAt) || now
+  });
+  playlist.updatedAt = now;
+
+  var saved = await (playlist.createdAt === now
+    ? createPlaylistRecord(playlist)
+    : updatePlaylistRecord(playlist.id, {
+        name: playlist.name,
+        type: playlist.type,
+        data: playlist.data,
+        meta: playlist.meta,
+        updatedAt: playlist.updatedAt
+      }));
+
+  await ytChannels.addChannel(url || ('https://www.youtube.com/watch?v=' + videoId), videoId, title);
+
+  return {
+    ok: true,
+    id: item.id,
+    videoId: videoId,
+    title: title,
+    playlistId: saved && saved.id || playlist.id,
+    playlistName: playlist.name,
+    groupName: groupName,
+    liveUrlPath: item.cmd
+  };
 }
 
 // GET /yt-channels sayfası zaten yukarıda tanımlı
@@ -5740,6 +5881,24 @@ app.get('/api/yt-channels', async function(req, res) {
   }
 });
 
+app.post('/api/youtube/live-tv', async function(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  try {
+    var result = await addYouTubeToLiveTv({
+      url: (req.body && req.body.url) || req.query.url,
+      title: (req.body && req.body.title) || req.query.title,
+      logo: (req.body && req.body.logo) || req.query.logo
+    });
+    var proto = String(req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http'));
+    var host = String(req.headers['x-forwarded-host'] || req.headers.host || ('localhost:' + PORT));
+    result.proxyUrl = proto + '://' + host + '/proxy/' + result.id;
+    result.liveUrl = proto + '://' + host + result.liveUrlPath;
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/yt-channels', async function(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   var url = safeTrim((req.body && req.body.url) || req.query.url);
@@ -5748,11 +5907,19 @@ app.post('/api/yt-channels', async function(req, res) {
   var videoId = ytStream.extractVideoId(url);
   if (!videoId) return res.status(400).json({ error: 'Gecersiz YouTube linki' });
   try {
-    var id = await ytChannels.addChannel(url, videoId, title);
+    var added = await addYouTubeToLiveTv({
+      url: url,
+      title: title,
+      logo: (req.body && req.body.logo) || req.query.logo
+    });
     var proto = String(req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http'));
     var host = String(req.headers['x-forwarded-host'] || req.headers.host || ('localhost:' + PORT));
-    var proxyUrl = proto + '://' + host + '/proxy/' + id;
-    res.json({ ok: true, id: id, proxyUrl: proxyUrl, videoId: videoId });
+    var proxyUrl = proto + '://' + host + '/proxy/' + added.id;
+    res.json(Object.assign({}, added, {
+      proxyUrl: proxyUrl,
+      liveUrl: proto + '://' + host + added.liveUrlPath,
+      videoId: videoId
+    }));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
