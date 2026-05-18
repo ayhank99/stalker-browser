@@ -128,12 +128,14 @@ async function loadChannels() {
 
 function renderChannels(channels) {
   const list = document.getElementById('channelsList');
+  window.__ytChannelMap = {};
   document.getElementById('countBadge').textContent = channels.length + ' kanal';
   if (!channels.length) {
     list.innerHTML = '<div class="empty">Henüz kanal eklenmedi. Yukarıdan bir YouTube linki ekleyin.</div>';
     return;
   }
   list.innerHTML = channels.map(ch => {
+    window.__ytChannelMap[ch.id] = ch;
     const proxyUrl = BASE + '/proxy/' + ch.id;
     const m3uLine = '#EXTINF:-1 tvg-id="yt-' + ch.id + '" group-title="YouTube Proxy",' + (ch.title || ch.url) + '\n' + proxyUrl;
     const date = ch.createdAt ? new Date(ch.createdAt).toLocaleString('tr-TR') : '';
@@ -149,6 +151,7 @@ function renderChannels(channels) {
             </div>
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0">
+            <button class="secondary" onclick="addListedChannelToLiveTv('${esc(ch.id)}', this)">Bizim Kanallara Ekle</button>
             <button class="secondary" onclick="testProxy('${esc(ch.id)}')">Test</button>
             <button class="danger" onclick="deleteChannel('${esc(ch.id)}')">Sil</button>
           </div>
@@ -163,6 +166,33 @@ function renderChannels(channels) {
         </div>
       </div>`;
   }).join('');
+}
+
+async function addListedChannelToLiveTv(id, btn) {
+  const ch = window.__ytChannelMap && window.__ytChannelMap[id];
+  if (!ch) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Ekleniyor...';
+  try {
+    const url = ch.url || ('https://www.youtube.com/watch?v=' + ch.videoId);
+    const r = await fetch('/api/youtube/live-tv', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, title: ch.title || '', logo: ch.logo || '' })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    btn.textContent = 'Eklendi';
+    const status = document.getElementById('addStatus');
+    status.className = 'status';
+    status.innerHTML = '✓ <strong>' + esc(ch.title || ch.url || id) + '</strong> Bizim Kanallar kategorisine eklendi.';
+    setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1800);
+  } catch (e) {
+    btn.textContent = original;
+    btn.disabled = false;
+    await showAlert('Ekleme hatasi: ' + e.message);
+  }
 }
 
 async function addChannel() {
