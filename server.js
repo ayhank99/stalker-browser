@@ -5615,10 +5615,80 @@ app.get('/api/yt-info', async function(req, res) {
 
 var ytChannels = require('./lib/yt-channels');
 var ytStream = require('./lib/yt-stream');
-var ytProxy = require('./lib/yt-proxy');
 ytChannels.configureStorage(storage);
 
+function decodeProxySegmentParam(value) {
+  try {
+    return Buffer.from(String(value || ''), 'base64url').toString('utf8');
+  } catch (error) {
+    return '';
+  }
+}
+
+async function resolveYouTubeProxyVideoId(proxyId) {
+  var id = safeTrim(proxyId);
+  var directVideoId = ytStream.extractVideoId(id);
+
+  if (directVideoId && /^yt_[A-Za-z0-9_-]{11}$/.test(id)) {
+    return directVideoId;
+  }
+
+  var channels = await ytChannels.getChannels();
+  var channel = channels && channels[id];
+  return safeTrim(channel && channel.videoId);
+}
+
+async function handleYouTubeProxyRoute(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+
+  var rawU = req.query && (Array.isArray(req.query.u) ? req.query.u[0] : req.query.u);
+  var rawUrl = req.query && (Array.isArray(req.query.url) ? req.query.url[0] : req.query.url);
+  var segmentUrl = safeTrim(rawUrl || (rawU ? decodeProxySegmentParam(rawU) : ''));
+
+  if (req.method === 'HEAD') {
+    res.setHeader('Content-Type', segmentUrl ? 'video/MP2T' : 'application/vnd.apple.mpegurl; charset=utf-8');
+    return res.status(200).end();
+  }
+
+  if (segmentUrl) {
+    return proxyRemoteStream(req, res, segmentUrl, {
+      'User-Agent': 'Mozilla/5.0',
+      Accept: '*/*'
+    });
+  }
+
+  var videoId = await resolveYouTubeProxyVideoId(req.params && req.params.id);
+  if (!videoId) {
+    return res.status(404).send('Kanal bulunamadi');
+  }
+
+  var resolved = await resolveYouTubeStream({
+    url: 'https://www.youtube.com/watch?v=' + videoId
+  });
+  if (!resolved || !resolved.streamUrl || resolved.playerMode === 'iframe') {
+    return res.status(503).send('YouTube stream could not be resolved');
+  }
+
+  return deliverResolvedStream(req, res, resolved);
+}
+
 // GET /yt-channels sayfası zaten yukarıda tanımlı
+
+app.all('/proxy', function(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS, PROPFIND');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+  res.status(req.method === 'OPTIONS' || req.method === 'PROPFIND' ? 204 : 404).end();
+});
+
+app.all('/proxy/', function(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS, PROPFIND');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+  res.status(req.method === 'OPTIONS' || req.method === 'PROPFIND' ? 204 : 404).end();
+});
 
 app.options('/proxy/:id', function(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -5627,12 +5697,32 @@ app.options('/proxy/:id', function(req, res) {
   res.status(200).end();
 });
 
-app.get('/proxy/:id', function(req, res) {
-  ytProxy.handle(req, res);
+app.get('/proxy/:id', async function(req, res) {
+  try {
+    await handleYouTubeProxyRoute(req, res);
+  } catch (error) {
+    console.error('[yt-proxy]', error && error.message);
+    if (!res.headersSent) {
+      res.status(503).send('YouTube stream could not be resolved');
+    }
+  }
 });
 
-app.head('/proxy/:id', function(req, res) {
-  ytProxy.handle(req, res);
+app.head('/proxy/:id', async function(req, res) {
+  try {
+    await handleYouTubeProxyRoute(req, res);
+  } catch (error) {
+    if (!res.headersSent) {
+      res.status(503).end();
+    }
+  }
+});
+
+app.all('/proxy/:id', function(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS, PROPFIND');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+  res.status(req.method === 'OPTIONS' || req.method === 'PROPFIND' ? 204 : 405).end();
 });
 
 app.get('/api/yt-channels', async function(req, res) {
