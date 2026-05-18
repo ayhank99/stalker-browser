@@ -2223,6 +2223,179 @@ function proxyRemoteStreamWithNodeHttp(req, res, targetUrl, headers) {
   });
 }
 
+function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
+  return new Promise(function (resolve) {
+    var normalizedId = safeTrim(videoId);
+    var pythonYtDlp = getPythonCandidates().find(function (candidate) {
+      return canImportPythonModule(candidate, 'yt_dlp');
+    });
+    var youtubeCommand = pythonYtDlp
+      ? { command: pythonYtDlp, argsPrefix: ['-m', 'yt_dlp'], label: pythonYtDlp + ' -m yt_dlp' }
+      : resolveYouTubeCommand();
+
+    if (!/^[A-Za-z0-9_-]{11}$/.test(normalizedId)) {
+      res.status(400).send('Gecersiz YouTube video ID');
+      resolve();
+      return;
+    }
+
+    if (!youtubeCommand) {
+      res.status(503).send('yt-dlp bulunamadi');
+      resolve();
+      return;
+    }
+
+    var youtubeUrl = 'https://www.youtube.com/watch?v=' + normalizedId;
+    var ytArgs = youtubeCommand.argsPrefix.concat([
+      '--no-warnings',
+      '--no-check-certificate',
+      '--geo-bypass',
+      '--no-playlist',
+      '-f',
+      'best[height<=720][ext=mp4]/best[height<=720]/best',
+      '-o',
+      '-',
+      '--',
+      youtubeUrl
+    ]);
+    var ffmpegArgs = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-nostdin',
+      '-fflags',
+      '+genpts+discardcorrupt',
+      '-err_detect',
+      'ignore_err',
+      '-i',
+      'pipe:0',
+      '-map',
+      '0:v:0?',
+      '-map',
+      '0:a:0?',
+      '-sn',
+      '-dn',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-tune',
+      'zerolatency',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-ac',
+      '2',
+      '-b:a',
+      '128k',
+      '-f',
+      'mpegts',
+      'pipe:1'
+    ];
+    var ytProcess;
+    var ffmpegProcess;
+    var finished = false;
+    var started = false;
+    var ytStderr = '';
+    var ffmpegStderr = '';
+    var startedAt = Date.now();
+
+    function finish() {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      resolve();
+    }
+
+    function killChildren() {
+      try { if (ytProcess && !ytProcess.killed) ytProcess.kill(); } catch (error) {}
+      try { if (ffmpegProcess && !ffmpegProcess.killed) ffmpegProcess.kill(); } catch (error) {}
+    }
+
+    try {
+      ytProcess = spawn(youtubeCommand.command, ytArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+      ffmpegProcess = spawn(FFMPEG_PATH, ffmpegArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+    } catch (error) {
+      killChildren();
+      if (!res.headersSent) {
+        res.status(500).send('YouTube TS proxy baslatilamadi: ' + error.message);
+      }
+      finish();
+      return;
+    }
+
+    console.log('[YouTube][TS] Python/yt-dlp -> ffmpeg:', normalizedId, '|', youtubeCommand.label || youtubeCommand.command);
+    setCommonProxyHeaders(res);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.status(200);
+    if (typeof res.flushHeaders === 'function') {
+      res.flushHeaders();
+    }
+
+    var startupTimer = setTimeout(function () {
+      if (!started && !finished) {
+        console.warn('[YouTube][TS] startup timeout:', normalizedId);
+        killChildren();
+      }
+    }, 35000);
+
+    ytProcess.stdout.pipe(ffmpegProcess.stdin);
+    ffmpegProcess.stdin.on('error', function () {});
+    ytProcess.stderr.on('data', function (chunk) {
+      if (ytStderr.length < 4000) ytStderr += chunk.toString();
+    });
+    ffmpegProcess.stderr.on('data', function (chunk) {
+      if (ffmpegStderr.length < 4000) ffmpegStderr += chunk.toString();
+      console.log('[YouTube][TS][ffmpeg]', chunk.toString().trim());
+    });
+    ffmpegProcess.stdout.once('data', function (chunk) {
+      started = true;
+      clearTimeout(startupTimer);
+      console.log('[YouTube][TS] first byte after ms:', Date.now() - startedAt);
+      res.write(chunk);
+      ffmpegProcess.stdout.pipe(res);
+    });
+    ytProcess.on('close', function (code) {
+      if (code && !finished) {
+        console.warn('[YouTube][TS] yt-dlp exit:', code, safeTrim(ytStderr).substring(0, 300));
+      }
+      try { ffmpegProcess.stdin.end(); } catch (error) {}
+    });
+    ytProcess.on('error', function (error) {
+      console.warn('[YouTube][TS] yt-dlp error:', error.message);
+      killChildren();
+    });
+    ffmpegProcess.on('error', function (error) {
+      console.warn('[YouTube][TS] ffmpeg error:', error.message);
+      killChildren();
+      finish();
+    });
+    ffmpegProcess.on('close', function (code, signal) {
+      clearTimeout(startupTimer);
+      console.log('[YouTube][TS] ffmpeg exit:', code, signal || '');
+      if (!started && !res.headersSent) {
+        res.status(503).send(safeTrim(ytStderr) || safeTrim(ffmpegStderr) || 'YouTube stream could not be resolved');
+      } else {
+        try { res.end(); } catch (error) {}
+      }
+      finish();
+    });
+    req.on('close', function () {
+      killChildren();
+      finish();
+    });
+  });
+}
+
 async function proxyCompatibleStream(req, res, targetUrl, baseHeaders, options) {
   var target = safeTrim(targetUrl);
   var probeOnly = !!(options && options.probeOnly);
@@ -3130,6 +3303,7 @@ async function resolveYouTubeStream(item) {
         videoId: videoId,
         playerMode: 'hls',
         kind: resolvedKind === 'unknown' ? (stream.isM3U8 ? 'hls' : 'mp4') : resolvedKind,
+        forceCompatibilityProxy: true,
         playbackHeaders: {
           'User-Agent': 'Mozilla/5.0',
           Accept: '*/*'
@@ -3158,7 +3332,7 @@ async function resolveYouTubeStream(item) {
       var itResult = await resolveViaInnerTube(videoId);
       if (itResult && itResult.streamUrl) {
         console.log('[YouTube] InnerTube OK (server):', itResult.kind, itResult.streamUrl.substring(0, 60));
-        return { streamUrl: itResult.streamUrl, isHls: itResult.isHls, videoId: videoId, playerMode: 'hls', kind: itResult.kind, playbackHeaders: {} };
+        return { streamUrl: itResult.streamUrl, isHls: itResult.isHls, videoId: videoId, playerMode: 'hls', kind: itResult.kind, forceCompatibilityProxy: true, playbackHeaders: {} };
       }
     } catch (ite) {
       console.warn('[YouTube] InnerTube hata:', (ite && ite.message || '').substring(0, 80));
@@ -3196,7 +3370,7 @@ async function resolveYouTubeStream(item) {
         if (hlsUrl) {
           var isHls = hlsUrl.indexOf('manifest') !== -1 || hlsUrl.indexOf('.m3u8') !== -1;
           console.log('[YouTube] yt-dlp OK:', isHls ? 'HLS' : 'MP4', hlsUrl.substring(0, 60));
-          return { streamUrl: hlsUrl, isHls: isHls, videoId: videoId, playerMode: 'hls', kind: isHls ? 'hls' : 'mp4', playbackHeaders: {} };
+          return { streamUrl: hlsUrl, isHls: isHls, videoId: videoId, playerMode: 'hls', kind: isHls ? 'hls' : 'mp4', forceCompatibilityProxy: true, playbackHeaders: {} };
         }
       }
     } catch (e) {
@@ -3210,7 +3384,7 @@ async function resolveYouTubeStream(item) {
       var itResult = await resolveViaInnerTube(videoId);
       if (itResult && itResult.streamUrl) {
         console.log('[YouTube] InnerTube OK:', itResult.kind, itResult.streamUrl.substring(0, 60));
-        return { streamUrl: itResult.streamUrl, isHls: itResult.isHls, videoId: videoId, playerMode: 'hls', kind: itResult.kind, playbackHeaders: {} };
+        return { streamUrl: itResult.streamUrl, isHls: itResult.isHls, videoId: videoId, playerMode: 'hls', kind: itResult.kind, forceCompatibilityProxy: true, playbackHeaders: {} };
       }
     } catch (ite) {
       console.warn('[YouTube] InnerTube hata:', (ite && ite.message || '').substring(0, 80));
@@ -3227,7 +3401,7 @@ async function resolveYouTubeStream(item) {
     var hlsManifestUrl = safeTrim(info && info.streamingData && info.streamingData.hlsManifestUrl);
     if (hlsManifestUrl) {
       console.log('[YouTube] ytdl-core HLS OK');
-      return { streamUrl: hlsManifestUrl, isHls: true, videoId: videoId, playerMode: 'hls', kind: 'hls', playbackHeaders: {} };
+      return { streamUrl: hlsManifestUrl, isHls: true, videoId: videoId, playerMode: 'hls', kind: 'hls', forceCompatibilityProxy: true, playbackHeaders: {} };
     }
     // Some ytdl-core forks don't reliably set hasVideo/hasAudio; infer muxed formats from mime + audio fields.
     var muxed = formats
@@ -3259,7 +3433,7 @@ async function resolveYouTubeStream(item) {
       var pickedMime = String(picked.mimeType || '').toLowerCase();
       var kind = pickedMime.indexOf('video/webm') === 0 ? 'webm' : 'mp4';
       console.log('[YouTube] ytdl-core muxed OK:', kind);
-      return { streamUrl: picked.url, isHls: false, videoId: videoId, playerMode: 'hls', kind: kind, playbackHeaders: {} };
+      return { streamUrl: picked.url, isHls: false, videoId: videoId, playerMode: 'hls', kind: kind, forceCompatibilityProxy: true, playbackHeaders: {} };
     }
   } catch (e) {
     console.warn('[YouTube] ytdl-core hata:', e.message.substring(0, 60));
@@ -3272,7 +3446,7 @@ async function resolveYouTubeStream(item) {
       var pipedUrl = piped.hlsUrl || piped.streamUrl;
       var pipedHls = !!(piped.hlsUrl);
       console.log('[YouTube] Piped OK:', pipedHls ? 'HLS' : 'MP4', pipedUrl.substring(0, 60));
-      return { streamUrl: pipedUrl, isHls: pipedHls, videoId: videoId, playerMode: 'hls', kind: pipedHls ? 'hls' : 'mp4', playbackHeaders: {} };
+      return { streamUrl: pipedUrl, isHls: pipedHls, videoId: videoId, playerMode: 'hls', kind: pipedHls ? 'hls' : 'mp4', forceCompatibilityProxy: true, playbackHeaders: {} };
     }
   } catch (pe) {
     console.warn('[YouTube] Piped hata:', (pe && pe.message || '').substring(0, 60));
@@ -3283,7 +3457,7 @@ async function resolveYouTubeStream(item) {
     var inv = await resolveViaInvidious(videoId);
     if (inv && inv.streamUrl) {
       console.log('[YouTube] Invidious OK:', inv.kind, inv.streamUrl.substring(0, 60));
-      return { streamUrl: inv.streamUrl, isHls: inv.isHls, videoId: videoId, playerMode: 'hls', kind: inv.kind, playbackHeaders: {} };
+      return { streamUrl: inv.streamUrl, isHls: inv.isHls, videoId: videoId, playerMode: 'hls', kind: inv.kind, forceCompatibilityProxy: true, playbackHeaders: {} };
     }
   } catch (inve) {
     console.warn('[YouTube] Invidious hata:', (inve && inve.message || '').substring(0, 60));
@@ -3340,10 +3514,10 @@ function streamExtension(kind, item) {
     }
     var originalUrl = getOriginalPlaybackUrl(item);
     if (originalUrl && isYouTubeUrl(originalUrl)) {
-      return 'm3u8';
+      return 'ts';
     }
     if (originalUrl && isYouTubeProxyUrl(originalUrl)) {
-      return 'm3u8';
+      return 'ts';
     }
     if (/\.m3u8(?:[\?#]|$)/i.test(originalUrl)) {
       return 'm3u8';
@@ -3923,8 +4097,11 @@ async function deliverResolvedStream(req, res, resolved) {
   var requestedExtension = requestedExtensionMatch ? requestedExtensionMatch[1].toLowerCase() : '';
   var resolvedKind = safeTrim(resolved.kind) || inferStreamKind(finalStreamUrl, '');
   var shouldTranscodeToTs =
-    requestedExtension === 'ts' &&
-    (resolved.forceCompatibilityProxy || resolvedKind === 'hls' || resolvedKind === 'dash');
+    resolved.forceCompatibilityProxy ||
+    (
+      requestedExtension === 'ts' &&
+      (resolvedKind === 'hls' || resolvedKind === 'dash')
+    );
 
   if (isRedirectDeliveryAllowed() && resolvedKind === 'hls') {
     console.log('[TV] redirect HLS master:', summarizeStreamUrlForLog(finalStreamUrl));
@@ -5760,14 +5937,7 @@ async function handleYouTubeProxyRoute(req, res) {
     return res.status(404).send('Kanal bulunamadi');
   }
 
-  var resolved = await resolveYouTubeStream({
-    url: 'https://www.youtube.com/watch?v=' + videoId
-  });
-  if (!resolved || !resolved.streamUrl || resolved.playerMode === 'iframe') {
-    return res.status(503).send('YouTube stream could not be resolved');
-  }
-
-  return deliverResolvedStream(req, res, resolved);
+  return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
 }
 
 function normalizeYouTubeLiveTitle(title, videoId) {
