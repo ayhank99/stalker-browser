@@ -2,8 +2,8 @@ FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-# Python (YouTube proxy icin gerekli)
-RUN apt-get update && apt-get install -y python3 python3-pip --no-install-recommends \
+# Python/FFmpeg (YouTube ve compat proxy icin gerekli)
+RUN apt-get update && apt-get install -y ffmpeg python3 python3-pip curl ca-certificates --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
@@ -16,9 +16,8 @@ COPY . .
 
 ENV NODE_ENV=production
 ENV DATA_DIR=/app/data
-# Railway gibi tek-port ortamlarinda ayrik TV sunucusu baslatilmaz;
-# xtream endpointleri zaten ana PORT uzerinden de erisilebelir.
-ENV ENABLE_TV_SERVER=0
+ENV ENABLE_TV_SERVER=1
+ENV TV_DELIVERY_MODE=proxy
 
 RUN mkdir -p /app/data
 

@@ -37,7 +37,9 @@ var DEFAULT_XTREAM_PASS = String(process.env.XTREAM_PASS || 'admin').trim() || '
 var ENABLE_TV_SERVER = process.env.ENABLE_TV_SERVER === '0' || process.env.VERCEL
   ? false
   : true;
-var TV_DELIVERY_MODE = ENABLE_TV_SERVER ? 'proxy' : 'redirect';
+var TV_DELIVERY_MODE = process.env.TV_DELIVERY_MODE === 'redirect' && process.env.ALLOW_REDIRECT_MODE === '1'
+  ? 'redirect'
+  : 'proxy';
 var APP_READONLY = process.env.APP_READONLY === '1';
 var FORCE_FILE_STORAGE = process.env.STORAGE_MODE === 'file' || process.env.FORCE_FILE_STORAGE === '1';
 var youtubeCommandCache = undefined;
@@ -1943,6 +1945,19 @@ function isRedirectStatusCode(status) {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
+function isRedirectDeliveryAllowed() {
+  return TV_DELIVERY_MODE === 'redirect' && process.env.ALLOW_REDIRECT_MODE === '1';
+}
+
+function summarizeStreamUrlForLog(targetUrl) {
+  try {
+    var parsed = new URL(String(targetUrl || ''));
+    return parsed.protocol + '//' + parsed.host + parsed.pathname;
+  } catch (error) {
+    return String(targetUrl || '').split('?')[0].substring(0, 160);
+  }
+}
+
 async function fetchWithPreservedHeaders(targetUrl, headers, timeoutMs) {
   var currentUrl = targetUrl;
   var maxRedirects = 5;
@@ -2021,6 +2036,8 @@ async function proxyRemoteStream(req, res, targetUrl, baseHeaders) {
     headers.Range = req.headers.range;
   }
 
+  console.log('[TV] proxy stream:', summarizeStreamUrlForLog(target));
+
   if (shouldUseNodeHttpProxyInput(target, headers)) {
     await proxyRemoteStreamWithNodeHttp(req, res, target, headers);
     return;
@@ -2031,6 +2048,7 @@ async function proxyRemoteStream(req, res, targetUrl, baseHeaders) {
     var upstream = upstreamResult.response;
     var finalUrl = safeTrim(upstreamResult.finalUrl || target);
     var contentType = safeTrim(upstream.headers.get('content-type'));
+    console.log('[TV] upstream:', upstream.status, contentType || '(no content-type)', summarizeStreamUrlForLog(finalUrl));
 
     if (!upstream.ok && upstream.status !== 206) {
       setCommonProxyHeaders(res);
@@ -2124,6 +2142,7 @@ function proxyRemoteStreamWithNodeHttp(req, res, targetUrl, headers) {
 
         var statusCode = Number(upstreamRes.statusCode || 0);
         var location = safeTrim(upstreamRes.headers.location);
+        var contentType = safeTrim((upstreamRes.headers || {})['content-type']);
 
         if (isRedirectStatusCode(statusCode) && location) {
           upstreamRes.resume();
@@ -2131,9 +2150,39 @@ function proxyRemoteStreamWithNodeHttp(req, res, targetUrl, headers) {
           return;
         }
 
+        console.log('[TV] upstream:', statusCode, contentType || '(no content-type)', summarizeStreamUrlForLog(currentUrl));
+
         if (!statusCode) {
           try { upstreamRes.destroy(); } catch (destroyError) {}
           fail(new Error('Upstream durum kodu alinamadi'));
+          return;
+        }
+
+        if ((statusCode === 200 || statusCode === 206) && isHlsResponse(currentUrl, contentType, '')) {
+          var manifestChunks = [];
+          upstreamRes.on('data', function (chunk) {
+            manifestChunks.push(chunk);
+          });
+          upstreamRes.on('end', function () {
+            if (!res.headersSent) {
+              var manifestText = Buffer.concat(manifestChunks).toString('utf8');
+              var rewrittenManifest = rewriteHlsManifest(
+                manifestText,
+                currentUrl,
+                req,
+                headers,
+                safeTrim(req.query.mac)
+              );
+              setCommonProxyHeaders(res);
+              res.status(statusCode);
+              res.setHeader('Cache-Control', 'no-store');
+              res.setHeader('Content-Type', contentType || 'application/x-mpegURL');
+              res.send(rewrittenManifest);
+            }
+            markResolved();
+          });
+          upstreamRes.on('close', markResolved);
+          upstreamRes.on('error', function () { markResolved(); });
           return;
         }
 
@@ -3780,23 +3829,27 @@ async function deliverResolvedStream(req, res, resolved) {
     requestedExtension === 'ts' &&
     (resolved.forceCompatibilityProxy || resolvedKind === 'hls' || resolvedKind === 'dash');
 
-  if (TV_DELIVERY_MODE === 'redirect' && resolvedKind === 'hls') {
+  if (isRedirectDeliveryAllowed() && resolvedKind === 'hls') {
+    console.log('[TV] redirect HLS master:', summarizeStreamUrlForLog(finalStreamUrl));
     sendSingleVariantHlsMaster(res, finalStreamUrl);
     return;
   }
 
   if (shouldTranscodeToTs) {
+    console.log('[TV] deliver compat proxy:', summarizeStreamUrlForLog(finalStreamUrl));
     await proxyCompatibleStream(req, res, finalStreamUrl, resolved.playbackHeaders || {}, {
       probeOnly: false
     });
     return;
   }
 
-  if (TV_DELIVERY_MODE === 'redirect') {
+  if (isRedirectDeliveryAllowed()) {
+    console.log('[TV] redirect stream:', summarizeStreamUrlForLog(finalStreamUrl));
     res.redirect(302, finalStreamUrl);
     return;
   }
 
+  console.log('[TV] deliver proxy:', summarizeStreamUrlForLog(finalStreamUrl));
   await proxyRemoteStream(req, res, finalStreamUrl, resolved.playbackHeaders || {});
 }
 
@@ -3931,7 +3984,10 @@ app.get('/api/yt', async function (req, res) {
     try {
       var pyUrl = await resolveViaPythonScript(videoId);
       console.log('[/api/yt] Python OK');
-      return res.redirect(302, pyUrl);
+      return proxyRemoteStream(req, res, pyUrl, {
+        'User-Agent': 'Mozilla/5.0',
+        Accept: '*/*'
+      });
     } catch (_) {}
   }
 
@@ -3940,7 +3996,10 @@ app.get('/api/yt', async function (req, res) {
     var itRes = await resolveViaInnerTube(videoId);
     if (itRes && itRes.streamUrl) {
       console.log('[/api/yt] InnerTube OK:', itRes.kind);
-      return res.redirect(302, itRes.streamUrl);
+      return proxyRemoteStream(req, res, itRes.streamUrl, {
+        'User-Agent': 'Mozilla/5.0',
+        Accept: '*/*'
+      });
     }
   } catch (ite) {
     console.warn('[/api/yt] InnerTube hata:', String(ite.message).substring(0, 80));
@@ -3950,7 +4009,13 @@ app.get('/api/yt', async function (req, res) {
   try {
     var piped = await getPipedStreamInfo(videoId);
     var pu = piped && (piped.hlsUrl || piped.streamUrl);
-    if (pu) { console.log('[/api/yt] Piped OK'); return res.redirect(302, pu); }
+    if (pu) {
+      console.log('[/api/yt] Piped OK');
+      return proxyRemoteStream(req, res, pu, {
+        'User-Agent': 'Mozilla/5.0',
+        Accept: '*/*'
+      });
+    }
   } catch (_) {}
 
   // 4. Invidious API
@@ -3958,7 +4023,10 @@ app.get('/api/yt', async function (req, res) {
     var invRes = await resolveViaInvidious(videoId);
     if (invRes && invRes.streamUrl) {
       console.log('[/api/yt] Invidious API OK:', invRes.kind);
-      return res.redirect(302, invRes.streamUrl);
+      return proxyRemoteStream(req, res, invRes.streamUrl, {
+        'User-Agent': 'Mozilla/5.0',
+        Accept: '*/*'
+      });
     }
   } catch (_) {}
 
@@ -3985,7 +4053,10 @@ app.get('/api/yt', async function (req, res) {
   var invFinalBase = bestInv || 'https://inv.nadeko.net';
   var invFinalUrl = invFinalBase + '/latest_version?id=' + videoId + '&itag=22&local=true';
   console.log('[/api/yt] Invidious latest_version son care:', invFinalBase);
-  return res.redirect(302, invFinalUrl);
+  return proxyRemoteStream(req, res, invFinalUrl, {
+    'User-Agent': 'Mozilla/5.0',
+    Accept: '*/*'
+  });
 });
 
 app.options('/api/stream', function (req, res) {
@@ -5119,42 +5190,17 @@ xtreamApp.get('/live/:user/:pass/:id', async function (req, res) {
   // segment paths. Serve the HLS playlist directly and rewrite segment URIs as absolute URLs.
   var originalUrl = getOriginalPlaybackUrl(found.item);
   if (originalUrl && isYouTubeUrl(originalUrl)) {
-    var ytVideoIdForLive = extractYouTubeVideoId(originalUrl);
-    if (!ytVideoIdForLive) return res.status(502).send('YouTube videoId alinamadi');
-
-    // Vercel'de: resolveYouTubeStream (ytdl-core + Piped) ile URL al, 302 redirect don.
-    // Data proxy etmek Vercel timeout'unu astirir; redirect IPTV player'lar tarafindan desteklenir.
-    // Lokal: oncelikle redirect dene; basarisiz olursa ytProxy ile proxy et.
     try {
       var liveResult = await resolveYouTubeStream({ url: originalUrl });
-      if (liveResult && liveResult.streamUrl && liveResult.playerMode !== 'iframe') {
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Cache-Control', 'no-cache, no-store');
-        return res.redirect(302, liveResult.streamUrl);
+      if (!liveResult || !liveResult.streamUrl || liveResult.playerMode === 'iframe') {
+        return res.status(503).send('YouTube stream could not be resolved');
       }
+      await deliverResolvedStream(req, res, liveResult);
     } catch (liveErr) {
       console.warn('[live/yt] resolve hata:', liveErr && liveErr.message);
-    }
-
-    // Lokal fallback: ytProxy ile dogrudan proxy et (Vercel'de calismaz ama local'de calisir)
-    if (!process.env.VERCEL) {
-      try {
-        var origLiveParams = req.params;
-        req.params = Object.assign({}, req.params || {}, { id: buildYouTubeProxyId(ytVideoIdForLive) });
-        try {
-          await ytProxy.handle(req, res);
-        } finally {
-          req.params = origLiveParams;
-        }
-        return;
-      } catch (proxyErr) {
-        if (!res.headersSent) res.status(500).send(proxyErr.message);
-        return;
+      if (!res.headersSent) {
+        res.status(503).send('YouTube stream could not be resolved');
       }
-    }
-
-    if (!res.headersSent) {
-      res.status(502).send('YouTube stream cozulemedi. yt-dlp ve flask yukleyin: pip install yt-dlp flask');
     }
     return;
   }
@@ -5180,9 +5226,12 @@ xtreamApp.get('/movie/:user/:pass/:id', async function (req, res) {
   if (originalUrl && isYouTubeUrl(originalUrl)) {
     try {
       var resolved = await resolveYouTubeStream(found.item);
+      if (!resolved || !resolved.streamUrl || resolved.playerMode === 'iframe') {
+        return res.status(503).send('YouTube stream could not be resolved');
+      }
       await deliverResolvedStream(req, res, resolved);
     } catch (error) {
-      res.status(500).send(error.message);
+      res.status(503).send('YouTube stream could not be resolved');
     }
     return;
   }
@@ -5212,9 +5261,12 @@ xtreamApp.get('/series/:user/:pass/:id', async function (req, res) {
   if (originalUrl && isYouTubeUrl(originalUrl)) {
     try {
       var resolved = await resolveYouTubeStream(found.item);
+      if (!resolved || !resolved.streamUrl || resolved.playerMode === 'iframe') {
+        return res.status(503).send('YouTube stream could not be resolved');
+      }
       await deliverResolvedStream(req, res, resolved);
     } catch (error) {
-      res.status(500).send(error.message);
+      res.status(503).send('YouTube stream could not be resolved');
     }
     return;
   }
@@ -5514,30 +5566,8 @@ app.get('/api/yt-stream', async function(req, res) {
       proc.on('error', reject);
     });
 
-    var fetchMod = null;
-    try { fetchMod = require('node-fetch'); } catch (_) {}
-    var fetchFn = fetchMod ? (fetchMod.default || fetchMod) : fetch;
-
     var upstreamHeaders = { 'User-Agent': 'Mozilla/5.0' };
-    if (req.headers['range']) upstreamHeaders['Range'] = req.headers['range'];
-
-    var upstream = await fetchFn(streamUrl, { headers: upstreamHeaders });
-
-    res.status(upstream.status);
-    var ct = upstream.headers.get('content-type');
-    var cl = upstream.headers.get('content-length');
-    var cr = upstream.headers.get('content-range');
-    var ar = upstream.headers.get('accept-ranges');
-    if (ct) res.set('Content-Type', ct);
-    if (cl) res.set('Content-Length', cl);
-    if (cr) res.set('Content-Range', cr);
-    if (ar) res.set('Accept-Ranges', ar);
-    res.set('Cache-Control', 'no-cache');
-
-    upstream.body.pipe(res);
-    req.on('close', function() {
-      try { upstream.body.destroy(); } catch (_) {}
-    });
+    await proxyRemoteStream(req, res, streamUrl, upstreamHeaders);
   } catch (e) {
     console.error('[yt-stream] id=' + id + ':', e.message);
     if (!res.headersSent) res.status(500).json({ error: 'Stream alinamadi: ' + e.message });
@@ -5697,6 +5727,7 @@ if (require.main === module) {
     var webServer = app.listen(PORT, function () {
       console.log('[Build] compat-bypass-active 2026-04-09');
       console.log('[Web] http://localhost:' + PORT);
+      console.log('[TV] delivery mode: ' + TV_DELIVERY_MODE);
       if (ENABLE_TV_SERVER) {
         console.log('[TV]  ' + (standaloneTvServerActive ? ('http://localhost:' + XTREAM_PORT) : ('http://localhost:' + PORT + ' (web icinde)')));
       } else {
