@@ -2425,6 +2425,10 @@ function getYtDlpCookiesFile() {
     return '';
   }
 
+  if (!inlineCookies.startsWith('# Netscape')) {
+    inlineCookies = '# Netscape HTTP Cookie File\n' + inlineCookies;
+  }
+
   var targetPath = process.platform === 'win32'
     ? path.join(DATA_DIR, 'yt-cookies.txt')
     : '/tmp/yt-cookies.txt';
