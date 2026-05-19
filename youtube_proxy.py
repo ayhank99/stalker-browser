@@ -283,7 +283,7 @@ def ensure_channel(channel_id, youtube_url="", title="", wait_ready=True):
 
         token_age = time.time() - float(record.get("resolved_ts") or 0)
         needs_resolve = not record.get("stream_url") or token_age > STREAM_TTL_SECONDS
-        needs_start = not is_process_alive(channel_id) or not playlist_is_fresh(channel_id)
+        ffmpeg_alive = is_process_alive(channel_id)
 
         if needs_resolve:
             resolved = resolve_stream(record["youtube_url"])
@@ -296,6 +296,11 @@ def ensure_channel(channel_id, youtube_url="", title="", wait_ready=True):
                 "resolved_at": utc_now(),
                 "resolved_ts": time.time(),
             })
+
+        # Only restart ffmpeg if it crashed OR if we just refreshed the stream URL.
+        # Do NOT restart just because segments aren't ready yet — concurrent requests
+        # would otherwise kill each other's ffmpeg process endlessly.
+        needs_start = not ffmpeg_alive or needs_resolve
 
         if needs_start:
             start_ffmpeg(channel_id, record["stream_url"], bool(record.get("is_live")))

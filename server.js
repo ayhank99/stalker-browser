@@ -604,7 +604,7 @@ function waitForYouTubeProxyReady(timeoutMs) {
     var proxyPort = getYouTubeProxyPort();
 
     function poll() {
-      probeLocalJsonEndpoint(proxyPort, '/health', 900, function (payload) {
+      probeLocalJsonEndpoint(proxyPort, '/health', 3000, function (payload) {
         if (payload && payload.status === 'ok') {
           resolve(payload);
           return;
@@ -619,7 +619,7 @@ function waitForYouTubeProxyReady(timeoutMs) {
           startYouTubeProxy();
         }
 
-        setTimeout(poll, 500);
+        setTimeout(poll, 800);
       });
     }
 
