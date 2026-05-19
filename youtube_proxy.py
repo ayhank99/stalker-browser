@@ -31,9 +31,35 @@ LIST_SIZE = int(os.environ.get("YOUTUBE_HLS_LIST_SIZE", "12") or "12")
 READY_TIMEOUT_SECONDS = int(os.environ.get("YOUTUBE_HLS_READY_TIMEOUT", "18") or "18")
 STREAM_TTL_SECONDS = int(os.environ.get("YOUTUBE_STREAM_TTL_SECONDS", str(4 * 60 * 60)) or str(4 * 60 * 60))
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
+YTDLP_BIN = [sys.executable, "-m", "yt_dlp"]
+
+# Cookie file path written from YOUTUBE_COOKIES env var (Netscape format)
+_COOKIE_FILE = os.path.join(
+    os.environ.get("DATA_DIR", "/tmp/iptv_data"), "youtube_cookies.txt"
+)
 
 os.makedirs(ROOT_DATA_DIR, exist_ok=True)
 os.makedirs(HLS_BASE, exist_ok=True)
+
+
+def _write_cookie_file():
+    """Write YOUTUBE_COOKIES env var content to a Netscape cookie file."""
+    raw = (os.environ.get("YOUTUBE_COOKIES") or "").strip()
+    if not raw:
+        return None
+    os.makedirs(os.path.dirname(_COOKIE_FILE), exist_ok=True)
+    try:
+        with open(_COOKIE_FILE, "w", encoding="utf-8") as fh:
+            if not raw.startswith("# Netscape"):
+                fh.write("# Netscape HTTP Cookie File\n")
+            fh.write(raw + "\n")
+        return _COOKIE_FILE
+    except Exception as exc:
+        log("[YouTube HLS] cookie write error:", exc)
+        return None
+
+
+_COOKIE_PATH = _write_cookie_file()
 
 lock = threading.RLock()
 processes = {}
@@ -109,17 +135,18 @@ def is_process_alive(channel_id):
 
 
 def stop_channel(channel_id):
-    proc = processes.pop(channel_id, None)
-    if not proc:
-        return
-    try:
-        proc.terminate()
-        proc.wait(timeout=3)
-    except Exception:
+    for key in (channel_id, channel_id + "_ytdlp"):
+        proc = processes.pop(key, None)
+        if not proc:
+            continue
         try:
-            proc.kill()
+            proc.terminate()
+            proc.wait(timeout=3)
         except Exception:
-            pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 def clean_hls_dir(channel_id):
@@ -168,6 +195,8 @@ def resolve_stream(youtube_url):
             }
         },
     }
+    if _COOKIE_PATH and os.path.exists(_COOKIE_PATH):
+        opts["cookiefile"] = _COOKIE_PATH
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(youtube_url, download=False)
 
@@ -196,70 +225,102 @@ def resolve_stream(youtube_url):
     }
 
 
-def ffmpeg_command(stream_url, channel_id, is_live):
-    out_dir = channel_dir(channel_id)
-    cmd = [
-        FFMPEG_BIN,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-nostdin",
-        "-reconnect",
-        "1",
-        "-reconnect_streamed",
-        "1",
-        "-reconnect_at_eof",
-        "1",
-        "-reconnect_delay_max",
-        "5",
-        "-user_agent",
-        "Mozilla/5.0",
+def _ytdlp_args(youtube_url):
+    """Build yt-dlp CLI args that pipe the stream to stdout."""
+    args = YTDLP_BIN + [
+        "--no-warnings",
+        "--no-check-certificate",
+        "--geo-bypass",
+        "--force-ipv4",
+        "--no-playlist",
+        "--extractor-args", "youtube:player_client=mweb,ios,android_vr,tv,web",
+        "-f", "best[protocol^=m3u8][height<=720]/best[height<=720][ext=mp4]/best[height<=720]/best",
+        "-o", "-",
     ]
-    if not is_live:
-        cmd.extend(["-re", "-stream_loop", "-1"])
-    cmd.extend([
-        "-i",
-        stream_url,
-        "-map",
-        "0:v:0?",
-        "-map",
-        "0:a:0?",
-        "-sn",
-        "-dn",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "copy",
-        "-f",
-        "hls",
-        "-hls_time",
-        str(SEGMENT_SECONDS),
-        "-hls_list_size",
-        str(LIST_SIZE),
-        "-hls_flags",
-        "delete_segments+append_list+omit_endlist+independent_segments",
-        "-hls_segment_filename",
-        os.path.join(out_dir, "segment_%06d.ts"),
+    if _COOKIE_PATH and os.path.exists(_COOKIE_PATH):
+        args += ["--cookies", _COOKIE_PATH]
+    args += ["--", youtube_url]
+    return args
+
+
+def _ffmpeg_hls_args(channel_id):
+    """Build ffmpeg args that read from stdin and write HLS to disk."""
+    out_dir = channel_dir(channel_id)
+    return [
+        FFMPEG_BIN,
+        "-hide_banner", "-loglevel", "warning", "-nostdin",
+        "-analyzeduration", "3000000", "-probesize", "3000000",
+        "-i", "pipe:0",
+        "-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn",
+        "-c:v", "copy", "-c:a", "copy",
+        "-f", "hls",
+        "-hls_time", str(SEGMENT_SECONDS),
+        "-hls_list_size", str(LIST_SIZE),
+        "-hls_flags", "delete_segments+append_list+omit_endlist+independent_segments",
+        "-hls_segment_filename", os.path.join(out_dir, "segment_%06d.ts"),
         playlist_path(channel_id),
-    ])
-    return cmd
+    ]
+
+
+def _log_stderr(label, pipe):
+    """Background thread that prints a process's stderr to our log."""
+    try:
+        for raw in pipe:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if line:
+                log(label, line)
+    except Exception:
+        pass
 
 
 def start_ffmpeg(channel_id, stream_url, is_live):
+    """Start yt-dlp piped into ffmpeg to produce HLS segments.
+
+    stream_url here is the canonical YouTube watch URL (not a CDN URL).
+    We pass it through yt-dlp so all auth/cookie handling is done by
+    yt-dlp rather than having ffmpeg hit the CDN URL directly (which
+    typically fails with 403 on cloud IPs).
+    """
     stop_channel(channel_id)
     clean_hls_dir(channel_id)
-    cmd = ffmpeg_command(stream_url, channel_id, is_live)
-    stderr_path = os.path.join(channel_dir(channel_id), "ffmpeg.log")
-    stderr_file = open(stderr_path, "ab")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=stderr_file,
+
+    ytdlp_args = _ytdlp_args(stream_url)
+    ffmpeg_args = _ffmpeg_hls_args(channel_id)
+
+    ytdlp_proc = subprocess.Popen(
+        ytdlp_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         close_fds=os.name != "nt",
     )
-    processes[channel_id] = proc
-    log("[YouTube HLS] ffmpeg started:", channel_id, "pid", proc.pid, "live" if is_live else "loop")
-    return proc
+    ffmpeg_proc = subprocess.Popen(
+        ffmpeg_args,
+        stdin=ytdlp_proc.stdout,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        close_fds=os.name != "nt",
+    )
+    # Hand pipe ownership to ffmpeg; parent doesn't need it
+    ytdlp_proc.stdout.close()
+
+    threading.Thread(
+        target=_log_stderr,
+        args=("[yt-dlp][" + channel_id + "]", ytdlp_proc.stderr),
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=_log_stderr,
+        args=("[ffmpeg][" + channel_id + "]", ffmpeg_proc.stderr),
+        daemon=True,
+    ).start()
+
+    # Store both; is_process_alive / stop_channel check ffmpeg_proc
+    processes[channel_id] = ffmpeg_proc
+    processes[channel_id + "_ytdlp"] = ytdlp_proc
+
+    log("[YouTube HLS] pipeline started:", channel_id,
+        "yt-dlp pid", ytdlp_proc.pid, "ffmpeg pid", ffmpeg_proc.pid,
+        "live" if is_live else "vod")
 
 
 def ensure_channel(channel_id, youtube_url="", title="", wait_ready=True):
@@ -281,29 +342,33 @@ def ensure_channel(channel_id, youtube_url="", title="", wait_ready=True):
         if not record.get("youtube_url"):
             raise RuntimeError("YouTube URL missing")
 
-        token_age = time.time() - float(record.get("resolved_ts") or 0)
-        needs_resolve = not record.get("stream_url") or token_age > STREAM_TTL_SECONDS
+        # Resolve metadata (title, is_live) once; we no longer pass the CDN URL to
+        # ffmpeg — yt-dlp handles that internally in the pipeline.
+        meta_age = time.time() - float(record.get("resolved_ts") or 0)
+        needs_meta = not record.get("resolved_ts") or meta_age > STREAM_TTL_SECONDS
         ffmpeg_alive = is_process_alive(channel_id)
 
-        if needs_resolve:
-            resolved = resolve_stream(record["youtube_url"])
-            record.update({
-                "stream_url": resolved["stream_url"],
-                "title": record.get("title") or resolved.get("title") or "",
-                "thumbnail": resolved.get("thumbnail") or record.get("thumbnail", ""),
-                "is_live": bool(resolved.get("is_live")),
-                "duration": resolved.get("duration") or 0,
-                "resolved_at": utc_now(),
-                "resolved_ts": time.time(),
-            })
+        if needs_meta:
+            try:
+                resolved = resolve_stream(record["youtube_url"])
+                record.update({
+                    "title": record.get("title") or resolved.get("title") or "",
+                    "thumbnail": resolved.get("thumbnail") or record.get("thumbnail", ""),
+                    "is_live": bool(resolved.get("is_live")),
+                    "duration": resolved.get("duration") or 0,
+                    "resolved_at": utc_now(),
+                    "resolved_ts": time.time(),
+                })
+            except Exception as meta_err:
+                log("[YouTube HLS] metadata resolve error (non-fatal):", meta_err)
+                record.setdefault("resolved_ts", time.time())
 
-        # Only restart ffmpeg if it crashed OR if we just refreshed the stream URL.
-        # Do NOT restart just because segments aren't ready yet — concurrent requests
-        # would otherwise kill each other's ffmpeg process endlessly.
-        needs_start = not ffmpeg_alive or needs_resolve
+        # Only restart the pipeline if it crashed OR metadata was just refreshed.
+        needs_start = not ffmpeg_alive or needs_meta
 
         if needs_start:
-            start_ffmpeg(channel_id, record["stream_url"], bool(record.get("is_live")))
+            # Pass the canonical YouTube URL; yt-dlp in the pipeline handles auth.
+            start_ffmpeg(channel_id, record["youtube_url"], bool(record.get("is_live")))
 
         record["updated_at"] = utc_now()
         channels[channel_id] = record
