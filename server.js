@@ -613,6 +613,7 @@ var storage = createStorage({
 
 app.get('/api/health', function (req, res) {
   var proxyPort = Math.max(1, Number(process.env.YOUTUBE_PROXY_PORT || 5000) || 5000);
+  var youtubeCommand = resolveYouTubeCommand();
   res.json({
     status: 'ok',
     now: new Date().toISOString(),
@@ -621,6 +622,12 @@ app.get('/api/health', function (req, res) {
     tvServerEnabled: ENABLE_TV_SERVER,
     youtubeProxyEnabled: process.env.ENABLE_YOUTUBE_PROXY !== '0',
     youtubeProxyPort: proxyPort,
+    youtubeStreamRuntime: {
+      ytDlp: youtubeCommand ? (youtubeCommand.label || youtubeCommand.command) : '',
+      ffmpeg: FFMPEG_PATH,
+      outboundProxyConfigured: !!safeTrim(process.env.YOUTUBE_HTTP_PROXY || process.env.YTDLP_PROXY || process.env.YOUTUBE_PROXY_URL),
+      cookiesConfigured: !!safeTrim(process.env.YOUTUBE_COOKIES || process.env.YOUTUBE_COOKIES_FILE || process.env.YTDLP_COOKIES_FILE)
+    },
     storage: storage.isDatabase ? 'database' : 'file',
     storageMode: storage.mode || (storage.isDatabase ? 'database' : 'file'),
     storageFallbackReason: storage.fallbackReason || ''
@@ -2298,6 +2305,308 @@ function appendYtDlpRuntimeArgs(args) {
   }
 }
 
+function buildFfmpegHttpHeaderArgs(headers) {
+  var lines = [];
+  Object.keys(headers || {}).forEach(function (key) {
+    var value = safeTrim(headers[key]);
+    if (value) {
+      lines.push(key + ': ' + value);
+    }
+  });
+
+  return lines.length ? ['-headers', lines.join('\r\n') + '\r\n'] : [];
+}
+
+function proxyRemoteUrlWithFfmpegToTs(req, res, inputUrl, headers, logLabel, options) {
+  return new Promise(function (resolve, reject) {
+    var target = safeTrim(inputUrl);
+    if (!target) {
+      reject(new Error('Fallback stream URL bulunamadi'));
+      return;
+    }
+
+    var headerArgs = buildFfmpegHttpHeaderArgs(Object.assign({
+      'User-Agent': 'Mozilla/5.0',
+      Accept: '*/*'
+    }, headers || {}));
+    var ffmpegArgs = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-nostdin',
+      '-reconnect',
+      '1',
+      '-reconnect_streamed',
+      '1',
+      '-reconnect_delay_max',
+      '5'
+    ].concat(headerArgs).concat([
+      '-fflags',
+      '+genpts+discardcorrupt',
+      '-err_detect',
+      'ignore_err',
+      '-i',
+      target,
+      '-map',
+      '0:v:0?',
+      '-map',
+      '0:a:0?',
+      '-sn',
+      '-dn',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-tune',
+      'zerolatency',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-ac',
+      '2',
+      '-b:a',
+      '128k',
+      '-f',
+      'mpegts',
+      'pipe:1'
+    ]);
+    var startupTimeoutMs = Math.max(3000, Number(options && options.startupTimeoutMs) || 35000);
+    var ffmpegProcess;
+    var started = false;
+    var finished = false;
+    var stderr = '';
+    var startedAt = Date.now();
+    var onReqClose;
+
+    function cleanup() {
+      try { if (ffmpegProcess && !ffmpegProcess.killed) ffmpegProcess.kill(); } catch (error) {}
+    }
+
+    function settle(error) {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearTimeout(startupTimer);
+      if (onReqClose) {
+        try { req.removeListener('close', onReqClose); } catch (removeError) {}
+      }
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    }
+
+    try {
+      ffmpegProcess = spawn(FFMPEG_PATH, ffmpegArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    console.log('[YouTube][TS] fallback ffmpeg:', safeTrim(logLabel) || 'resolved-url', summarizeStreamUrlForLog(target));
+
+    var startupTimer = setTimeout(function () {
+      if (!started && !finished) {
+        console.warn('[YouTube][TS] fallback startup timeout:', summarizeStreamUrlForLog(target));
+        cleanup();
+      }
+    }, startupTimeoutMs);
+
+    ffmpegProcess.stderr.on('data', function (chunk) {
+      if (stderr.length < 4000) stderr += chunk.toString();
+      console.log('[YouTube][TS][fallback ffmpeg]', chunk.toString().trim());
+    });
+
+    ffmpegProcess.stdout.once('data', function (chunk) {
+      if (finished) {
+        return;
+      }
+      started = true;
+      clearTimeout(startupTimer);
+      console.log('[YouTube][TS] fallback first byte after ms:', Date.now() - startedAt);
+      setCommonProxyHeaders(res);
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'video/mp2t');
+      res.status(200);
+      if (typeof res.flushHeaders === 'function') {
+        res.flushHeaders();
+      }
+      res.write(chunk);
+      ffmpegProcess.stdout.pipe(res);
+    });
+
+    ffmpegProcess.on('error', function (error) {
+      cleanup();
+      settle(error);
+    });
+
+    ffmpegProcess.on('close', function (code, signal) {
+      if (!started) {
+        settle(new Error(safeTrim(stderr) || ('Fallback FFmpeg cikis kodu: ' + code + (signal ? ', signal: ' + signal : ''))));
+        return;
+      }
+      try { res.end(); } catch (error) {}
+      settle();
+    });
+
+    onReqClose = function () {
+      cleanup();
+      settle();
+    };
+    req.once('close', onReqClose);
+  });
+}
+
+function configuredList(raw, defaults) {
+  var configured = safeTrim(raw)
+    .split(',')
+    .map(function (value) { return safeTrim(value).replace(/\/+$/, ''); })
+    .filter(Boolean);
+  return configured.length ? configured : defaults;
+}
+
+var YOUTUBE_FALLBACK_INVIDIOUS = configuredList(process.env.INVIDIOUS_INSTANCES, [
+  'https://inv.nadeko.net',
+  'https://invidious.io.lol',
+  'https://inv.vern.cc',
+  'https://invidious.private.coffee',
+  'https://yt.cdaut.de',
+  'https://invidious.nerdvpn.de',
+  'https://invidious.privacydev.net',
+  'https://inv.thepixora.com',
+  'https://yt.chocolatemoo53.com',
+  'https://invidious.jing.rocks',
+  'https://iv.ggtyler.dev',
+  'https://invidious.incogniweb.net',
+  'https://y.com.sb',
+  'https://invidious.drgns.space',
+  'https://inv.tux.pizza'
+]);
+
+var YOUTUBE_FALLBACK_PIPED = configuredList(process.env.PIPED_INSTANCES, [
+  'https://pipedapi.kavin.rocks',
+  'https://pipedapi.adminforge.de',
+  'https://piped-api.garudalinux.org',
+  'https://pipedapi.tokhmi.xyz',
+  'https://pipedapi.moomoo.me',
+  'https://pipedapi.rivo.pw'
+]);
+
+function addYouTubeFallbackCandidate(candidates, seen, source, url, headers) {
+  var target = safeTrim(url);
+  if (!target || seen[target]) {
+    return;
+  }
+  if (ytStream && typeof ytStream.isGoogleCdnUrl === 'function' && ytStream.isGoogleCdnUrl(target) && process.env.ALLOW_GOOGLEVIDEO_FALLBACK !== '1') {
+    return;
+  }
+  seen[target] = true;
+  candidates.push({
+    source: source,
+    url: target,
+    headers: headers || {
+      'User-Agent': 'Mozilla/5.0',
+      Accept: '*/*'
+    }
+  });
+}
+
+async function readYouTubeFallbackJson(url, timeoutMs) {
+  var response = await fetch(url, {
+    timeout: timeoutMs || 6000,
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      Accept: 'application/json,text/plain,*/*'
+    }
+  });
+  if (!response || !response.ok) {
+    return null;
+  }
+  var text = await response.text();
+  if (!safeTrim(text) || safeTrim(text).charAt(0) === '<') {
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    return null;
+  }
+}
+
+async function buildYouTubeFallbackCandidates(videoId, firstResolvedStream) {
+  var candidates = [];
+  var seen = {};
+  var normalizedId = safeTrim(videoId);
+  var maxCandidates = Math.max(1, Number(process.env.YOUTUBE_FALLBACK_MAX_CANDIDATES || 10) || 10);
+
+  if (firstResolvedStream && firstResolvedStream.url) {
+    addYouTubeFallbackCandidate(candidates, seen, firstResolvedStream.source || 'resolver', firstResolvedStream.url);
+  }
+
+  var invidiousApiChecks = YOUTUBE_FALLBACK_INVIDIOUS.slice(0, 8).map(function (base) {
+    return readYouTubeFallbackJson(base + '/api/v1/videos/' + encodeURIComponent(normalizedId), 6000)
+      .then(function (json) {
+        if (!json) return;
+        if (typeof json.hls === 'string') {
+          addYouTubeFallbackCandidate(candidates, seen, 'invidious-hls:' + base, json.hls);
+        }
+        var streams = []
+          .concat(Array.isArray(json.formatStreams) ? json.formatStreams : [])
+          .concat(Array.isArray(json.adaptiveFormats) ? json.adaptiveFormats : []);
+        streams
+          .filter(function (stream) {
+            return stream && stream.url && /video\/mp4/i.test(String(stream.type || stream.mimeType || ''));
+          })
+          .slice(0, 3)
+          .forEach(function (stream) {
+            addYouTubeFallbackCandidate(candidates, seen, 'invidious-mp4:' + base, stream.url);
+          });
+      })
+      .catch(function () {});
+  });
+
+  var pipedApiChecks = YOUTUBE_FALLBACK_PIPED.slice(0, 6).map(function (base) {
+    return readYouTubeFallbackJson(base + '/streams/' + encodeURIComponent(normalizedId), 6000)
+      .then(function (json) {
+        if (!json) return;
+        if (typeof json.hls === 'string') {
+          addYouTubeFallbackCandidate(candidates, seen, 'piped-hls:' + base, json.hls);
+        }
+        []
+          .concat(Array.isArray(json.videoStreams) ? json.videoStreams : [])
+          .filter(function (stream) {
+            return stream && stream.url && /mp4/i.test(String(stream.format || stream.mimeType || 'mp4'));
+          })
+          .slice(0, 3)
+          .forEach(function (stream) {
+            addYouTubeFallbackCandidate(candidates, seen, 'piped-mp4:' + base, stream.url);
+          });
+      })
+      .catch(function () {});
+  });
+
+  await Promise.all(invidiousApiChecks.concat(pipedApiChecks));
+
+  YOUTUBE_FALLBACK_INVIDIOUS.slice(0, 6).forEach(function (base) {
+    ['18', '22'].forEach(function (itag) {
+      addYouTubeFallbackCandidate(
+        candidates,
+        seen,
+        'invidious-latest:' + base + ':' + itag,
+        base + '/latest_version?id=' + encodeURIComponent(normalizedId) + '&itag=' + itag + '&local=true'
+      );
+    });
+  });
+
+  return candidates.slice(0, maxCandidates);
+}
+
 function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
   return new Promise(function (resolve) {
     var normalizedId = safeTrim(videoId);
@@ -2376,6 +2685,7 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
     var ffmpegProcess;
     var finished = false;
     var started = false;
+    var fallbackStarted = false;
     var ytStderr = '';
     var ffmpegStderr = '';
     var startedAt = Date.now();
@@ -2391,6 +2701,59 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
     function killChildren() {
       try { if (ytProcess && !ytProcess.killed) ytProcess.kill(); } catch (error) {}
       try { if (ffmpegProcess && !ffmpegProcess.killed) ffmpegProcess.kill(); } catch (error) {}
+    }
+
+    async function startResolvedFallback(reason) {
+      if (fallbackStarted || started || finished || res.headersSent) {
+        return false;
+      }
+      fallbackStarted = true;
+      clearTimeout(startupTimer);
+      console.warn('[YouTube][TS] primary failed, resolver fallback:', normalizedId, safeTrim(reason).substring(0, 220));
+
+      try {
+        if (ytStream && typeof ytStream.invalidateStreamCache === 'function') {
+          ytStream.invalidateStreamCache(normalizedId);
+        }
+
+        var stream = await ytStream.getStreamUrl(normalizedId, { skipGoogleCdn: true });
+        if ((!stream || !stream.url) && process.env.ALLOW_GOOGLEVIDEO_FALLBACK === '1') {
+          stream = await ytStream.getStreamUrl(normalizedId, { skipGoogleCdn: false });
+        }
+
+        var candidates = await buildYouTubeFallbackCandidates(normalizedId, stream);
+        if (!candidates.length) {
+          throw new Error((stream && (stream.error || JSON.stringify(stream.attempts || []))) || 'Fallback source bulunamadi');
+        }
+
+        var lastError = null;
+        for (var i = 0; i < candidates.length; i++) {
+          if (finished || res.headersSent) {
+            finish();
+            return true;
+          }
+          try {
+            console.log('[YouTube][TS] fallback candidate:', (i + 1) + '/' + candidates.length, candidates[i].source, summarizeStreamUrlForLog(candidates[i].url));
+            await proxyRemoteUrlWithFfmpegToTs(req, res, candidates[i].url, candidates[i].headers, candidates[i].source, {
+              startupTimeoutMs: Math.max(3000, Number(process.env.YOUTUBE_FALLBACK_STARTUP_TIMEOUT_MS || 8000) || 8000)
+            });
+            finish();
+            return true;
+          } catch (candidateError) {
+            lastError = candidateError;
+            console.warn('[YouTube][TS] fallback candidate failed:', candidates[i].source, candidateError && candidateError.message);
+          }
+        }
+
+        throw lastError || new Error('Fallback source veri uretmedi');
+      } catch (error) {
+        console.warn('[YouTube][TS] fallback failed:', error && error.message);
+        if (!res.headersSent) {
+          res.status(503).send('YouTube stream could not be resolved');
+        }
+        finish();
+        return true;
+      }
     }
 
     try {
@@ -2412,9 +2775,6 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
     }
 
     console.log('[YouTube][TS] Python/yt-dlp -> ffmpeg:', normalizedId, '|', youtubeCommand.label || youtubeCommand.command);
-    setCommonProxyHeaders(res);
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Content-Type', 'video/mp2t');
 
     var startupTimer = setTimeout(function () {
       if (!started && !finished) {
@@ -2436,6 +2796,9 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
       started = true;
       clearTimeout(startupTimer);
       console.log('[YouTube][TS] first byte after ms:', Date.now() - startedAt);
+      setCommonProxyHeaders(res);
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'video/mp2t');
       res.status(200);
       if (typeof res.flushHeaders === 'function') {
         res.flushHeaders();
@@ -2462,11 +2825,13 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
       clearTimeout(startupTimer);
       console.log('[YouTube][TS] ffmpeg exit:', code, signal || '');
       if (!started && !res.headersSent) {
-        res.status(503).send(safeTrim(ytStderr) || safeTrim(ffmpegStderr) || 'YouTube stream could not be resolved');
-      } else {
-        try { res.end(); } catch (error) {}
+        startResolvedFallback(safeTrim(ytStderr) || safeTrim(ffmpegStderr) || ('ffmpeg exit ' + code + (signal ? ' ' + signal : '')));
+        return;
       }
-      finish();
+      if (!fallbackStarted) {
+        try { res.end(); } catch (error) {}
+        finish();
+      }
     });
     req.on('close', function () {
       killChildren();
