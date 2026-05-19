@@ -164,7 +164,7 @@ def resolve_stream(youtube_url):
         "format": "best[protocol^=m3u8][height<=720]/best[height<=720][ext=mp4]/best[height<=720]/best",
         "extractor_args": {
             "youtube": {
-                "player_client": ["android_vr", "tv", "web"]
+                "player_client": ["mweb", "ios", "android_vr", "tv", "web"]
             }
         },
     }
@@ -227,19 +227,9 @@ def ffmpeg_command(stream_url, channel_id, is_live):
         "-sn",
         "-dn",
         "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-tune",
-        "zerolatency",
-        "-pix_fmt",
-        "yuv420p",
+        "copy",
         "-c:a",
-        "aac",
-        "-ac",
-        "2",
-        "-b:a",
-        "128k",
+        "copy",
         "-f",
         "hls",
         "-hls_time",

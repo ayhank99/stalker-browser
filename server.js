@@ -2786,7 +2786,7 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
       '--no-playlist',
       '--hls-use-mpegts',
       '--extractor-args',
-      'youtube:player_client=android_vr,tv,web',
+      'youtube:player_client=mweb,ios,android_vr,tv,web',
       '-f',
       'best[protocol^=m3u8][height<=720]/best[height<=720][ext=mp4]/best[height<=720]/best',
       '-o',
@@ -2799,6 +2799,8 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
       '-loglevel',
       'error',
       '-nostdin',
+      '-analyzeduration', '2000000',
+      '-probesize', '2000000',
       '-fflags',
       '+genpts+discardcorrupt',
       '-err_detect',
@@ -2812,19 +2814,9 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
       '-sn',
       '-dn',
       '-c:v',
-      'libx264',
-      '-preset',
-      'veryfast',
-      '-tune',
-      'zerolatency',
-      '-pix_fmt',
-      'yuv420p',
+      'copy',
       '-c:a',
-      'aac',
-      '-ac',
-      '2',
-      '-b:a',
-      '128k',
+      'copy',
       '-f',
       'mpegts',
       'pipe:1'
@@ -3009,14 +3001,10 @@ async function deliverYouTubeIptvStream(req, res, item, routeLabel) {
 
     await proxyYouTubePythonHlsAsTs(req, res, videoId, sourceUrl, title, routeLabel);
   } catch (pythonError) {
-    console.warn('[YouTube][IPTV] python HLS failed:', videoId, pythonError && pythonError.message);
-    if (isManagedSinglePortHost(req)) {
-      if (!res.headersSent) {
-        res.status(503).send('YouTube stream could not be resolved');
-      }
-      return;
+    console.warn('[YouTube][IPTV] python HLS failed, trying direct yt-dlp fallback:', videoId, pythonError && pythonError.message);
+    if (!res.headersSent) {
+      await proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
     }
-    await proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
   }
 }
 
@@ -4889,11 +4877,10 @@ app.get('/api/yt', async function (req, res) {
       '/api/yt'
     );
   } catch (pythonError) {
-    console.warn('[/api/yt] python HLS failed:', videoId, pythonError && pythonError.message);
-    if (isManagedSinglePortHost(req)) {
-      return res.status(503).send('YouTube stream could not be resolved');
+    console.warn('[/api/yt] python HLS failed, trying direct yt-dlp fallback:', videoId, pythonError && pythonError.message);
+    if (!res.headersSent) {
+      return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
     }
-    return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
   }
 });
 
@@ -6396,11 +6383,10 @@ app.get('/api/yt-stream', async function(req, res) {
       '/api/yt-stream'
     );
   } catch (pythonError) {
-    console.warn('[/api/yt-stream] python HLS failed:', videoId, pythonError && pythonError.message);
-    if (isManagedSinglePortHost(req)) {
-      return res.status(503).send('YouTube stream could not be resolved');
+    console.warn('[/api/yt-stream] python HLS failed, trying direct yt-dlp fallback:', videoId, pythonError && pythonError.message);
+    if (!res.headersSent) {
+      return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
     }
-    return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
   }
 });
 
@@ -6600,11 +6586,10 @@ async function handleYouTubeProxyRoute(req, res) {
       'YouTube ' + videoId
     );
   } catch (pythonError) {
-    console.warn('[yt-proxy] python HLS failed:', videoId, pythonError && pythonError.message);
-    if (isManagedSinglePortHost(req)) {
-      return res.status(503).send('YouTube stream could not be resolved');
+    console.warn('[yt-proxy] python HLS failed, trying direct yt-dlp fallback:', videoId, pythonError && pythonError.message);
+    if (!res.headersSent) {
+      return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
     }
-    return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
   }
 }
 
