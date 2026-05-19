@@ -2799,8 +2799,8 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
       '-loglevel',
       'error',
       '-nostdin',
-      '-analyzeduration', '2000000',
-      '-probesize', '2000000',
+      '-analyzeduration', '500000',
+      '-probesize', '500000',
       '-fflags',
       '+genpts+discardcorrupt',
       '-err_detect',
@@ -2980,6 +2980,178 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
   });
 }
 
+// ─── Per-channel broadcast relay ────────────────────────────────────────────
+// IPTV players typically send a short "probe" request (reads a few bytes, then
+// closes) followed immediately by the real playback request.  Without the relay
+// each close event kills the yt-dlp+ffmpeg pipeline, forcing a full 7-18 s
+// restart for every reconnect.  The relay keeps the pipeline alive for
+// YT_RELAY_IDLE_MS after the last client leaves so the real request re-attaches
+// to an already-running process.
+var _ytIptvRelays = Object.create(null);
+var YT_RELAY_IDLE_MS = 30 * 1000;
+
+function _ytRelaySetHeaders(res) {
+  setCommonProxyHeaders(res);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'video/mp2t');
+  res.status(200);
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+}
+
+function _ytRelayStart(videoId) {
+  var existing = _ytIptvRelays[videoId];
+  if (existing && !existing.dead) {
+    clearTimeout(existing.idleTimer);
+    existing.idleTimer = null;
+    return existing;
+  }
+
+  var pythonYtDlp = getPythonCandidates().find(function (c) {
+    return canImportPythonModule(c, 'yt_dlp');
+  });
+  var cmd = pythonYtDlp
+    ? { command: pythonYtDlp, argsPrefix: ['-m', 'yt_dlp'], label: pythonYtDlp + ' -m yt_dlp' }
+    : resolveYouTubeCommand();
+  if (!cmd) return null;
+
+  var youtubeUrl = 'https://www.youtube.com/watch?v=' + videoId;
+  var ytArgs = cmd.argsPrefix.concat([
+    '--no-warnings', '--no-check-certificate', '--geo-bypass', '--force-ipv4',
+    '--no-playlist', '--hls-use-mpegts',
+    '--extractor-args', 'youtube:player_client=mweb,ios,android_vr,tv,web',
+    '-f', 'best[protocol^=m3u8][height<=720]/best[height<=720][ext=mp4]/best[height<=720]/best',
+    '-o', '-'
+  ]);
+  appendYtDlpRuntimeArgs(ytArgs);
+  ytArgs.push('--', youtubeUrl);
+
+  var ffmpegArgs = [
+    '-hide_banner', '-loglevel', 'error', '-nostdin',
+    '-analyzeduration', '500000', '-probesize', '500000',
+    '-fflags', '+genpts+discardcorrupt', '-err_detect', 'ignore_err',
+    '-i', 'pipe:0',
+    '-map', '0:v:0?', '-map', '0:a:0?', '-sn', '-dn',
+    '-c:v', 'copy', '-c:a', 'copy',
+    '-f', 'mpegts', 'pipe:1'
+  ];
+
+  var relay = {
+    videoId: videoId,
+    dead: false,
+    started: false,
+    startedAt: Date.now(),
+    clients: [],
+    idleTimer: null,
+    ytProc: null,
+    ffmpegProc: null
+  };
+  _ytIptvRelays[videoId] = relay;
+
+  try {
+    relay.ytProc = spawn(cmd.command, ytArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    relay.ffmpegProc = spawn(FFMPEG_PATH, ffmpegArgs, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  } catch (spawnErr) {
+    console.warn('[YouTube][Relay] spawn error:', videoId, spawnErr.message);
+    relay.dead = true;
+    delete _ytIptvRelays[videoId];
+    return null;
+  }
+
+  relay.ytProc.stdout.pipe(relay.ffmpegProc.stdin);
+  relay.ffmpegProc.stdin.on('error', function () {});
+
+  relay.ytProc.stderr.on('data', function (d) {
+    var t = d.toString().trim();
+    if (t) console.warn('[YouTube][Relay][yt-dlp]', videoId, t.substring(0, 300));
+  });
+  relay.ffmpegProc.stderr.on('data', function (d) {
+    var t = d.toString().trim();
+    if (t) console.log('[YouTube][Relay][ffmpeg]', videoId, t.substring(0, 300));
+  });
+
+  var startupKillTimer = setTimeout(function () {
+    if (!relay.started && !relay.dead) {
+      console.warn('[YouTube][Relay] startup timeout, killing:', videoId);
+      try { relay.ytProc.kill(); } catch (e) {}
+      try { relay.ffmpegProc.kill(); } catch (e) {}
+    }
+  }, 60000);
+
+  relay.ffmpegProc.stdout.on('data', function (chunk) {
+    if (!relay.started) {
+      relay.started = true;
+      clearTimeout(startupKillTimer);
+      console.log('[YouTube][Relay] first byte after ms:', Date.now() - relay.startedAt, 'clients:', relay.clients.length);
+      relay.clients.forEach(function (c) {
+        if (!c.headersSent) _ytRelaySetHeaders(c);
+      });
+    }
+    relay.clients.forEach(function (c) {
+      if (!c.writableEnded) {
+        try { c.write(chunk); } catch (e) {}
+      }
+    });
+  });
+
+  relay.ytProc.on('close', function (code) {
+    if (code) console.warn('[YouTube][Relay] yt-dlp exit:', videoId, code);
+    try { relay.ffmpegProc.stdin.end(); } catch (e) {}
+  });
+
+  relay.ffmpegProc.on('close', function (code) {
+    clearTimeout(startupKillTimer);
+    console.log('[YouTube][Relay] ffmpeg exit:', videoId, code);
+    relay.dead = true;
+    clearTimeout(relay.idleTimer);
+    delete _ytIptvRelays[videoId];
+    relay.clients.forEach(function (c) { try { c.end(); } catch (e) {} });
+    relay.clients = [];
+  });
+
+  console.log('[YouTube][Relay] pipeline started:', videoId, cmd.label || cmd.command);
+  return relay;
+}
+
+function proxyYouTubeRelayToResponse(req, res, videoId) {
+  return new Promise(function (resolve) {
+    var normalizedId = safeTrim(videoId);
+    if (!/^[A-Za-z0-9_-]{11}$/.test(normalizedId)) {
+      if (!res.headersSent) res.status(400).send('Gecersiz video ID');
+      return resolve();
+    }
+
+    var relay = _ytRelayStart(normalizedId);
+    if (!relay) {
+      if (!res.headersSent) res.status(503).send('yt-dlp bulunamadi');
+      return resolve();
+    }
+
+    if (relay.started && !res.headersSent) {
+      _ytRelaySetHeaders(res);
+    }
+
+    relay.clients.push(res);
+
+    req.on('close', function () {
+      relay.clients = relay.clients.filter(function (c) { return c !== res; });
+      try { res.end(); } catch (e) {}
+
+      if (relay.clients.length === 0 && !relay.dead && !relay.idleTimer) {
+        relay.idleTimer = setTimeout(function () {
+          if (!relay.dead && relay.clients.length === 0) {
+            console.log('[YouTube][Relay] idle, stopping pipeline:', normalizedId);
+            try { relay.ytProc && relay.ytProc.kill(); } catch (e) {}
+            try { relay.ffmpegProc && relay.ffmpegProc.kill(); } catch (e) {}
+          }
+        }, YT_RELAY_IDLE_MS);
+      }
+
+      resolve();
+    });
+  });
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function deliverYouTubeIptvStream(req, res, item, routeLabel) {
   var videoId = getYouTubeVideoIdFromPlaylistItem(item);
   if (!videoId) {
@@ -2993,19 +3165,17 @@ async function deliverYouTubeIptvStream(req, res, item, routeLabel) {
   var title = safeTrim(item && item.name);
   var requestedExtension = requestItemExtension(req.params && req.params.id);
 
-  try {
-    if (requestedExtension === 'm3u8') {
+  if (requestedExtension === 'm3u8') {
+    try {
       await sendYouTubePythonHlsManifest(req, res, videoId, buildYouTubeProxyId(videoId), sourceUrl, title);
-      return;
+    } catch (err) {
+      if (!res.headersSent) res.status(503).send('YouTube HLS manifest could not be resolved');
     }
-
-    await proxyYouTubePythonHlsAsTs(req, res, videoId, sourceUrl, title, routeLabel);
-  } catch (pythonError) {
-    console.warn('[YouTube][IPTV] python HLS failed, trying direct yt-dlp fallback:', videoId, pythonError && pythonError.message);
-    if (!res.headersSent) {
-      await proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
-    }
+    return;
   }
+
+  // Use relay for .ts: pipeline survives probe→real connection cycles without restarting.
+  await proxyYouTubeRelayToResponse(req, res, videoId);
 }
 
 async function proxyCompatibleStream(req, res, targetUrl, baseHeaders, options) {
