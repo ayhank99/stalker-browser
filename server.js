@@ -1538,6 +1538,36 @@ function isYouTubeProxyUrl(url) {
   }
 }
 
+function getYouTubeVideoIdFromPlaylistItem(item) {
+  var sourceMeta = item && item.sourceMeta && typeof item.sourceMeta === 'object'
+    ? item.sourceMeta
+    : {};
+  var candidates = [
+    sourceMeta.videoId,
+    sourceMeta.originalUrl,
+    item && item.videoId,
+    item && item.url,
+    item && item.originalUrl,
+    item && item.sourceCmd,
+    item && item.cmd,
+    item && item.direct_source,
+    item && item.id
+  ];
+
+  for (var i = 0; i < candidates.length; i++) {
+    var videoId = ytStream.extractVideoId(safeTrim(candidates[i]));
+    if (videoId) {
+      return videoId;
+    }
+  }
+
+  return '';
+}
+
+function isYouTubePlaylistItem(item) {
+  return !!getYouTubeVideoIdFromPlaylistItem(item);
+}
+
 function isGoogleVideoUrl(url) {
   var normalized = String(url || '').trim().toLowerCase();
   return normalized.indexOf('googlevideo.com/') !== -1 ||
@@ -2229,6 +2259,45 @@ function proxyRemoteStreamWithNodeHttp(req, res, targetUrl, headers) {
   });
 }
 
+function getYtDlpCookiesFile() {
+  var configuredPath = safeTrim(process.env.YOUTUBE_COOKIES_FILE || process.env.YTDLP_COOKIES_FILE);
+  if (configuredPath && fs.existsSync(configuredPath)) {
+    return configuredPath;
+  }
+
+  var inlineCookies = safeTrim(process.env.YOUTUBE_COOKIES).replace(/\\n/g, '\n');
+  if (!inlineCookies) {
+    return '';
+  }
+
+  var targetPath = process.platform === 'win32'
+    ? path.join(DATA_DIR, 'yt-cookies.txt')
+    : '/tmp/yt-cookies.txt';
+  try {
+    fs.writeFileSync(targetPath, inlineCookies);
+    return targetPath;
+  } catch (error) {
+    console.warn('[YouTube][TS] cookies yazilamadi:', error.message);
+    return '';
+  }
+}
+
+function appendYtDlpRuntimeArgs(args) {
+  var cookiesFile = getYtDlpCookiesFile();
+  if (cookiesFile) {
+    args.push('--cookies', cookiesFile);
+  }
+
+  var outboundProxy = safeTrim(
+    process.env.YOUTUBE_HTTP_PROXY ||
+    process.env.YTDLP_PROXY ||
+    process.env.YOUTUBE_PROXY_URL
+  );
+  if (outboundProxy) {
+    args.push('--proxy', outboundProxy);
+  }
+}
+
 function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
   return new Promise(function (resolve) {
     var normalizedId = safeTrim(videoId);
@@ -2256,14 +2325,18 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
       '--no-warnings',
       '--no-check-certificate',
       '--geo-bypass',
+      '--force-ipv4',
       '--no-playlist',
+      '--hls-use-mpegts',
+      '--extractor-args',
+      'youtube:player_client=android_vr,tv,web',
       '-f',
-      'best[height<=720][ext=mp4]/best[height<=720]/best',
+      'best[protocol^=m3u8][height<=720]/best[height<=720][ext=mp4]/best[height<=720]/best',
       '-o',
-      '-',
-      '--',
-      youtubeUrl
+      '-'
     ]);
+    appendYtDlpRuntimeArgs(ytArgs);
+    ytArgs.push('--', youtubeUrl);
     var ffmpegArgs = [
       '-hide_banner',
       '-loglevel',
@@ -2400,6 +2473,17 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
       finish();
     });
   });
+}
+
+async function deliverYouTubeIptvStream(req, res, item, routeLabel) {
+  var videoId = getYouTubeVideoIdFromPlaylistItem(item);
+  if (!videoId) {
+    res.status(503).send('YouTube stream could not be resolved');
+    return;
+  }
+
+  console.log('[YouTube][IPTV] proxy TS:', safeTrim(routeLabel) || 'stream', videoId);
+  await proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
 }
 
 async function proxyCompatibleStream(req, res, targetUrl, baseHeaders, options) {
@@ -3518,13 +3602,10 @@ function streamExtension(kind, item) {
     if (safeTrim(item && item.sourceType) === 'loop') {
       return 'm3u8';
     }
+    if (isYouTubePlaylistItem(item)) {
+      return 'ts';
+    }
     var originalUrl = getOriginalPlaybackUrl(item);
-    if (originalUrl && isYouTubeUrl(originalUrl)) {
-      return 'ts';
-    }
-    if (originalUrl && isYouTubeProxyUrl(originalUrl)) {
-      return 'ts';
-    }
     if (/\.m3u8(?:[\?#]|$)/i.test(originalUrl)) {
       return 'm3u8';
     }
@@ -3536,6 +3617,15 @@ function streamExtension(kind, item) {
     return match ? match[1].toLowerCase() : 'mp4';
   }
   return 'mp4';
+}
+
+function requestItemExtension(value) {
+  var match = String(value || '').match(/\.([a-z0-9]{2,5})$/i);
+  return match ? match[1].toLowerCase() : '';
+}
+
+function isSubtitleSidecarExtension(extension) {
+  return ['smi', 'srt', 'ass', 'ssa', 'sub', 'vtt'].indexOf(safeTrim(extension).toLowerCase()) !== -1;
 }
 
 function buildLocalStreamUrl(baseUrl, kind, username, password, outputId, item) {
@@ -4182,16 +4272,13 @@ app.get('/api/youtube/resolve', async function (req, res) {
     return res.json({ ok: false, error: 'Gecersiz YouTube URL', videoId: null });
   }
 
-  var fakeItem = { url: url };
-  var result = await resolveYouTubeStream(fakeItem);
-
   return res.json({
     ok: true,
-    streamUrl: (result && result.streamUrl) || null,
-    hlsUrl: (result && (result.hlsUrl || result.streamUrl)) || null,
+    streamUrl: buildRuntimeBaseUrl(req) + buildYouTubeProxyPath(videoId) + '?raw=1',
+    hlsUrl: null,
     videoId: videoId,
-    playerMode: (result && result.playerMode) || 'iframe',
-    isHls: (result && result.isHls) || false
+    playerMode: 'mpegts',
+    isHls: false
   });
 });
 
@@ -4258,85 +4345,7 @@ app.get('/api/yt', async function (req, res) {
   }
 
   console.log('[/api/yt] Cozumleniyor:', videoId);
-
-  // 1. Python yt_resolver.py (sadece local)
-  if (!process.env.VERCEL) {
-    try {
-      var pyUrl = await resolveViaPythonScript(videoId);
-      console.log('[/api/yt] Python OK');
-      return proxyRemoteStream(req, res, pyUrl, {
-        'User-Agent': 'Mozilla/5.0',
-        Accept: '*/*'
-      });
-    } catch (_) {}
-  }
-
-  // 2. InnerTube iOS API (Vercel dahil her ortamda, dogru POST ile)
-  try {
-    var itRes = await resolveViaInnerTube(videoId);
-    if (itRes && itRes.streamUrl) {
-      console.log('[/api/yt] InnerTube OK:', itRes.kind);
-      return proxyRemoteStream(req, res, itRes.streamUrl, {
-        'User-Agent': 'Mozilla/5.0',
-        Accept: '*/*'
-      });
-    }
-  } catch (ite) {
-    console.warn('[/api/yt] InnerTube hata:', String(ite.message).substring(0, 80));
-  }
-
-  // 3. Piped API
-  try {
-    var piped = await getPipedStreamInfo(videoId);
-    var pu = piped && (piped.hlsUrl || piped.streamUrl);
-    if (pu) {
-      console.log('[/api/yt] Piped OK');
-      return proxyRemoteStream(req, res, pu, {
-        'User-Agent': 'Mozilla/5.0',
-        Accept: '*/*'
-      });
-    }
-  } catch (_) {}
-
-  // 4. Invidious API
-  try {
-    var invRes = await resolveViaInvidious(videoId);
-    if (invRes && invRes.streamUrl) {
-      console.log('[/api/yt] Invidious API OK:', invRes.kind);
-      return proxyRemoteStream(req, res, invRes.streamUrl, {
-        'User-Agent': 'Mozilla/5.0',
-        Accept: '*/*'
-      });
-    }
-  } catch (_) {}
-
-  // 5. Invidious /latest_version — kesin son care, instance'i kontrol etmeden redirect
-  // Invidious kendi sunucusu uzerinden YouTube'dan videoyu cekip IPTV player'a verir.
-  // IPTV player bu URL'yi alir ve Invidious uzerinden videoyu oynatir.
-  var invInstances = INVIDIOUS_API_INSTANCES.concat([
-    'https://invidious.io.lol',
-    'https://invidious.ducks.party',
-    'https://iv.datura.network'
-  ]);
-  // Kisa bir health check ile ilk cevap veren instance'i sec
-  var bestInv = null;
-  var invChecks = invInstances.map(function(base) {
-    return fetchWithTimeout(base + '/api/v1/stats', 3000)
-      .then(function(r) { return r.ok ? base : null; })
-      .catch(function() { return null; });
-  });
-  try {
-    var invResults = await Promise.all(invChecks);
-    bestInv = invResults.find(function(b) { return b !== null; });
-  } catch (_) {}
-
-  var invFinalBase = bestInv || 'https://inv.nadeko.net';
-  var invFinalUrl = invFinalBase + '/latest_version?id=' + videoId + '&itag=22&local=true';
-  console.log('[/api/yt] Invidious latest_version son care:', invFinalBase);
-  return proxyRemoteStream(req, res, invFinalUrl, {
-    'User-Agent': 'Mozilla/5.0',
-    Accept: '*/*'
-  });
+  return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
 });
 
 app.options('/api/stream', function (req, res) {
@@ -5457,6 +5466,11 @@ xtreamApp.get('/player_api.php', async function (req, res) {
 });
 
 xtreamApp.get('/live/:user/:pass/:id', async function (req, res) {
+  var requestedExtension = requestItemExtension(req.params.id);
+  if (isSubtitleSidecarExtension(requestedExtension)) {
+    return res.status(404).send('Subtitle not found');
+  }
+
   var streamId = String(req.params.id || '').replace(/\.[^.]+$/, '');
   var found = await findStreamEntry('live', streamId);
 
@@ -5468,16 +5482,11 @@ xtreamApp.get('/live/:user/:pass/:id', async function (req, res) {
   // Loop channels are already local HLS output.
   // NOTE: Some IPTV clients (notably Kodi/PVR IPTV Simple) are unreliable with HTTP redirects + relative
   // segment paths. Serve the HLS playlist directly and rewrite segment URIs as absolute URLs.
-  var originalUrl = getOriginalPlaybackUrl(found.item);
-  if (originalUrl && isYouTubeUrl(originalUrl)) {
+  if (isYouTubePlaylistItem(found.item)) {
     try {
-      var liveResult = await resolveYouTubeStream({ url: originalUrl });
-      if (!liveResult || !liveResult.streamUrl || liveResult.playerMode === 'iframe') {
-        return res.status(503).send('YouTube stream could not be resolved');
-      }
-      await deliverResolvedStream(req, res, liveResult);
+      await deliverYouTubeIptvStream(req, res, found.item, 'live/' + streamId);
     } catch (liveErr) {
-      console.warn('[live/yt] resolve hata:', liveErr && liveErr.message);
+      console.warn('[live/yt] proxy hata:', liveErr && liveErr.message);
       if (!res.headersSent) {
         res.status(503).send('YouTube stream could not be resolved');
       }
@@ -5494,6 +5503,11 @@ xtreamApp.get('/live/:user/:pass/:id', async function (req, res) {
 });
 
 xtreamApp.get('/movie/:user/:pass/:id', async function (req, res) {
+  var requestedExtension = requestItemExtension(req.params.id);
+  if (isSubtitleSidecarExtension(requestedExtension)) {
+    return res.status(404).send('Subtitle not found');
+  }
+
   var streamId = String(req.params.id || '').replace(/\.[^.]+$/, '');
   var found = await findStreamEntry('movies', streamId);
 
@@ -5502,16 +5516,13 @@ xtreamApp.get('/movie/:user/:pass/:id', async function (req, res) {
     return;
   }
 
-  var originalUrl = getOriginalPlaybackUrl(found.item);
-  if (originalUrl && isYouTubeUrl(originalUrl)) {
+  if (isYouTubePlaylistItem(found.item)) {
     try {
-      var resolved = await resolveYouTubeStream(found.item);
-      if (!resolved || !resolved.streamUrl || resolved.playerMode === 'iframe') {
-        return res.status(503).send('YouTube stream could not be resolved');
-      }
-      await deliverResolvedStream(req, res, resolved);
+      await deliverYouTubeIptvStream(req, res, found.item, 'movie/' + streamId);
     } catch (error) {
-      res.status(503).send('YouTube stream could not be resolved');
+      if (!res.headersSent) {
+        res.status(503).send('YouTube stream could not be resolved');
+      }
     }
     return;
   }
@@ -5525,6 +5536,11 @@ xtreamApp.get('/movie/:user/:pass/:id', async function (req, res) {
 });
 
 xtreamApp.get('/series/:user/:pass/:id', async function (req, res) {
+  var requestedExtension = requestItemExtension(req.params.id);
+  if (isSubtitleSidecarExtension(requestedExtension)) {
+    return res.status(404).send('Subtitle not found');
+  }
+
   var seriesToken = String(req.params.id || '').replace(/\.[^.]+$/, '');
   var seriesMatch = seriesToken.match(/^(.+?)(?:-s(\d+)-e(\d+))?$/);
   var streamId = seriesMatch ? seriesMatch[1] : seriesToken;
@@ -5537,16 +5553,13 @@ xtreamApp.get('/series/:user/:pass/:id', async function (req, res) {
     return;
   }
 
-  var originalUrl = getOriginalPlaybackUrl(found.item);
-  if (originalUrl && isYouTubeUrl(originalUrl)) {
+  if (isYouTubePlaylistItem(found.item)) {
     try {
-      var resolved = await resolveYouTubeStream(found.item);
-      if (!resolved || !resolved.streamUrl || resolved.playerMode === 'iframe') {
-        return res.status(503).send('YouTube stream could not be resolved');
-      }
-      await deliverResolvedStream(req, res, resolved);
+      await deliverYouTubeIptvStream(req, res, found.item, 'series/' + streamId);
     } catch (error) {
-      res.status(503).send('YouTube stream could not be resolved');
+      if (!res.headersSent) {
+        res.status(503).send('YouTube stream could not be resolved');
+      }
     }
     return;
   }
@@ -5817,41 +5830,11 @@ app.options('/api/yt-stream', function(req, res) {
 
 app.get('/api/yt-stream', async function(req, res) {
   var id = String(req.query.id || '').trim();
-  var quality = String(req.query.quality || 'best[height<=720][ext=mp4]/best[height<=720]/best');
 
   if (!id) return res.status(400).json({ error: 'id parametresi gerekli' });
 
   res.set('Access-Control-Allow-Origin', '*');
-
-  var ytCmd = resolveYouTubeCommand();
-  if (!ytCmd) return res.status(503).json({ error: 'yt-dlp bulunamadi' });
-
-  try {
-    var streamUrl = await new Promise(function(resolve, reject) {
-      var cp = require('child_process');
-      var args = (ytCmd.argsPrefix || []).concat([
-        '--no-check-certificate', '--geo-bypass', '--no-playlist',
-        '-f', quality, '-g', '--',
-        'https://www.youtube.com/watch?v=' + id
-      ]);
-      var proc = cp.spawn(ytCmd.command, args, { windowsHide: true });
-      var out = '', err = '';
-      proc.stdout.on('data', function(d) { out += d.toString(); });
-      proc.stderr.on('data', function(d) { err += d.toString(); });
-      proc.on('close', function(code) {
-        var lines = out.trim().split('\n').filter(Boolean);
-        if (lines[0]) resolve(lines[0].trim());
-        else reject(new Error('yt-dlp basarisiz (kod ' + code + '): ' + err.substring(0, 100)));
-      });
-      proc.on('error', reject);
-    });
-
-    var upstreamHeaders = { 'User-Agent': 'Mozilla/5.0' };
-    await proxyRemoteStream(req, res, streamUrl, upstreamHeaders);
-  } catch (e) {
-    console.error('[yt-stream] id=' + id + ':', e.message);
-    if (!res.headersSent) res.status(500).json({ error: 'Stream alinamadi: ' + e.message });
-  }
+  return proxyYouTubeWithYtDlpFfmpeg(req, res, id);
 });
 
 app.get('/api/yt-info', async function(req, res) {
@@ -6153,10 +6136,9 @@ app.post('/api/youtube/live-tv', async function(req, res) {
       title: (req.body && req.body.title) || req.query.title,
       logo: (req.body && req.body.logo) || req.query.logo
     });
-    var proto = String(req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http'));
-    var host = String(req.headers['x-forwarded-host'] || req.headers.host || ('localhost:' + PORT));
-    result.proxyUrl = proto + '://' + host + '/proxy/' + result.id;
-    result.liveUrl = proto + '://' + host + result.liveUrlPath;
+    var baseUrl = buildRuntimeBaseUrl(req);
+    result.proxyUrl = baseUrl + '/proxy/' + result.id;
+    result.liveUrl = baseUrl + result.liveUrlPath;
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -6176,12 +6158,11 @@ app.post('/api/yt-channels', async function(req, res) {
       title: title,
       logo: (req.body && req.body.logo) || req.query.logo
     });
-    var proto = String(req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http'));
-    var host = String(req.headers['x-forwarded-host'] || req.headers.host || ('localhost:' + PORT));
-    var proxyUrl = proto + '://' + host + '/proxy/' + added.id;
+    var baseUrl = buildRuntimeBaseUrl(req);
+    var proxyUrl = baseUrl + '/proxy/' + added.id;
     res.json(Object.assign({}, added, {
       proxyUrl: proxyUrl,
-      liveUrl: proto + '://' + host + added.liveUrlPath,
+      liveUrl: baseUrl + added.liveUrlPath,
       videoId: videoId
     }));
   } catch (e) {

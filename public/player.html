@@ -1176,6 +1176,13 @@ window.addEventListener('load', function() {
         } else {
           setInfo('YouTube: stream cozulemedi');
         }
+      } else if (data.playerMode === 'mpegts' && data.streamUrl) {
+        console.log('[YouTube] MPEG-TS proxy bulundu, direkt oynatiliyor');
+        sourceUrl = data.streamUrl;
+        sourceHeaders = {};
+        compatibilityFallbackActive = false;
+        setInfo('YouTube canli yayin yukleniyor...');
+        startPlayback(false);
       } else if ((data.playerMode === 'hls' || data.isHls || data.hlsUrl) && data.streamUrl) {
         // Canli yayin: HLS.js ile oynat
         console.log('[YouTube] HLS stream bulundu, HLS.js ile oynatiliyor');
