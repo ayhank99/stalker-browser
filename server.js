@@ -2792,7 +2792,7 @@ function proxyYouTubeWithYtDlpFfmpeg(req, res, videoId) {
       '--extractor-args',
       'youtube:player_client=mweb,ios,android_vr,tv,web',
       '-f',
-      'best[protocol^=m3u8][height<=720]/best[height<=720][ext=mp4]/best[height<=720]/best',
+      'best[protocol^=m3u8]/best[vcodec!=none][acodec!=none]/best',
       '-o',
       '-'
     ]);
@@ -3023,7 +3023,7 @@ function _ytRelayStart(videoId) {
     '--no-warnings', '--no-check-certificate', '--geo-bypass', '--force-ipv4',
     '--no-playlist', '--hls-use-mpegts',
     '--extractor-args', 'youtube:player_client=mweb,ios,android_vr,tv,web',
-    '-f', 'best[protocol^=m3u8][height<=720]/best[height<=720][ext=mp4]/best[height<=720]/best',
+    '-f', 'best[protocol^=m3u8]/best[vcodec!=none][acodec!=none]/best',
     '-o', '-'
   ]);
   appendYtDlpRuntimeArgs(ytArgs);

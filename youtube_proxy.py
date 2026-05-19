@@ -187,7 +187,7 @@ def resolve_stream(youtube_url):
         "socket_timeout": 25,
         "geo_bypass": True,
         "nocheckcertificate": True,
-        "format": "best[protocol^=m3u8][height<=720]/best[height<=720][ext=mp4]/best[height<=720]/best",
+        "format": "best[protocol^=m3u8]/best[vcodec!=none][acodec!=none]/best",
         "extractor_args": {
             "youtube": {
                 "player_client": ["mweb", "ios", "android_vr", "tv", "web"]
@@ -233,7 +233,7 @@ def _ytdlp_args(youtube_url):
         "--force-ipv4",
         "--no-playlist",
         "--extractor-args", "youtube:player_client=mweb,ios,android_vr,tv,web",
-        "-f", "best[protocol^=m3u8][height<=720]/best[height<=720][ext=mp4]/best[height<=720]/best",
+        "-f", "best[protocol^=m3u8]/best[vcodec!=none][acodec!=none]/best",
         "-o", "-",
     ]
     if _COOKIE_PATH and os.path.exists(_COOKIE_PATH):
