@@ -28,8 +28,7 @@ CHANNELS_FILE = os.path.join(ROOT_DATA_DIR, "channels.json")
 HLS_BASE = os.path.join(ROOT_DATA_DIR, "hls")
 SEGMENT_SECONDS = int(os.environ.get("YOUTUBE_HLS_TIME", "4") or "4")
 LIST_SIZE = int(os.environ.get("YOUTUBE_HLS_LIST_SIZE", "12") or "12")
-READY_TIMEOUT_SECONDS = int(os.environ.get("YOUTUBE_HLS_READY_TIMEOUT", "18") or "18")
-STREAM_TTL_SECONDS = int(os.environ.get("YOUTUBE_STREAM_TTL_SECONDS", str(4 * 60 * 60)) or str(4 * 60 * 60))
+READY_TIMEOUT_SECONDS = int(os.environ.get("YOUTUBE_HLS_READY_TIMEOUT", "30") or "30")
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 YTDLP_BIN = [sys.executable, "-m", "yt_dlp"]
 
@@ -342,32 +341,10 @@ def ensure_channel(channel_id, youtube_url="", title="", wait_ready=True):
         if not record.get("youtube_url"):
             raise RuntimeError("YouTube URL missing")
 
-        # Resolve metadata (title, is_live) once; we no longer pass the CDN URL to
-        # ffmpeg — yt-dlp handles that internally in the pipeline.
-        meta_age = time.time() - float(record.get("resolved_ts") or 0)
-        needs_meta = not record.get("resolved_ts") or meta_age > STREAM_TTL_SECONDS
-        ffmpeg_alive = is_process_alive(channel_id)
-
-        if needs_meta:
-            try:
-                resolved = resolve_stream(record["youtube_url"])
-                record.update({
-                    "title": record.get("title") or resolved.get("title") or "",
-                    "thumbnail": resolved.get("thumbnail") or record.get("thumbnail", ""),
-                    "is_live": bool(resolved.get("is_live")),
-                    "duration": resolved.get("duration") or 0,
-                    "resolved_at": utc_now(),
-                    "resolved_ts": time.time(),
-                })
-            except Exception as meta_err:
-                log("[YouTube HLS] metadata resolve error (non-fatal):", meta_err)
-                record.setdefault("resolved_ts", time.time())
-
-        # Only restart the pipeline if it crashed OR metadata was just refreshed.
-        needs_start = not ffmpeg_alive or needs_meta
-
-        if needs_start:
-            # Pass the canonical YouTube URL; yt-dlp in the pipeline handles auth.
+        # Start pipeline only if it crashed or was never started.
+        # yt-dlp in the pipeline handles auth, URL resolution, and cookies internally —
+        # no need to call resolve_stream() here before startup.
+        if not is_process_alive(channel_id):
             start_ffmpeg(channel_id, record["youtube_url"], bool(record.get("is_live")))
 
         record["updated_at"] = utc_now()
