@@ -543,7 +543,8 @@ function startYouTubeProxy() {
         windowsHide: true,
         env: Object.assign({}, process.env, {
           YOUTUBE_PROXY_HOST: proxyHost,
-          YOUTUBE_PROXY_PORT: String(proxyPort)
+          YOUTUBE_PROXY_PORT: String(proxyPort),
+          FFMPEG_BIN: FFMPEG_PATH || 'ffmpeg'
         })
       });
     } catch (error) {
@@ -575,6 +576,101 @@ function startYouTubeProxy() {
 
     console.log('[YouTube Proxy] PID:', youtubeProxyProcess.pid);
   });
+}
+
+function getYouTubeProxyPort() {
+  return Math.max(1, Number(process.env.YOUTUBE_PROXY_PORT || 5000) || 5000);
+}
+
+function getYouTubeProxyBaseUrl() {
+  return 'http://127.0.0.1:' + String(getYouTubeProxyPort());
+}
+
+function isPythonYouTubeHlsEnabled() {
+  return process.env.ENABLE_YOUTUBE_PROXY !== '0' &&
+    process.env.ENABLE_YOUTUBE_HLS_PROXY !== '0' &&
+    !process.env.VERCEL;
+}
+
+function waitForYouTubeProxyReady(timeoutMs) {
+  return new Promise(function (resolve, reject) {
+    if (!isPythonYouTubeHlsEnabled()) {
+      reject(new Error('Python YouTube HLS proxy disabled'));
+      return;
+    }
+
+    var startedAt = Date.now();
+    var timeout = Math.max(1000, Number(timeoutMs || 18000) || 18000);
+    var proxyPort = getYouTubeProxyPort();
+
+    function poll() {
+      probeLocalJsonEndpoint(proxyPort, '/health', 900, function (payload) {
+        if (payload && payload.status === 'ok') {
+          resolve(payload);
+          return;
+        }
+
+        if ((Date.now() - startedAt) >= timeout) {
+          reject(new Error('Python YouTube HLS proxy hazir degil'));
+          return;
+        }
+
+        if (!youtubeProxyProcess) {
+          startYouTubeProxy();
+        }
+
+        setTimeout(poll, 500);
+      });
+    }
+
+    poll();
+  });
+}
+
+async function fetchYouTubeProxyJson(pathName, options) {
+  await waitForYouTubeProxyReady(options && options.readyTimeoutMs);
+  var response = await fetch(getYouTubeProxyBaseUrl() + pathName, {
+    method: options && options.method || 'GET',
+    headers: options && options.headers || {},
+    body: options && options.body,
+    timeout: options && options.timeoutMs || 60000
+  });
+  var text = await response.text();
+  var payload = null;
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch (error) {
+    payload = { error: text };
+  }
+  if (!response.ok || !payload || payload.ok === false) {
+    throw new Error(safeTrim(payload && payload.error) || ('Python YouTube HLS proxy hata: ' + response.status));
+  }
+  return payload;
+}
+
+async function ensurePythonYouTubeHls(videoId, sourceUrl, title) {
+  var normalizedId = safeTrim(videoId);
+  if (!/^[A-Za-z0-9_-]{11}$/.test(normalizedId)) {
+    throw new Error('Gecersiz YouTube video ID');
+  }
+
+  var channelId = buildYouTubeProxyId(normalizedId);
+  var payload = await fetchYouTubeProxyJson('/api/ensure/' + encodeURIComponent(channelId), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: safeTrim(sourceUrl) || ('https://www.youtube.com/watch?v=' + normalizedId),
+      title: safeTrim(title)
+    }),
+    readyTimeoutMs: 20000,
+    timeoutMs: 70000
+  });
+
+  if (!payload.ready) {
+    throw new Error('Python YouTube HLS hazir degil');
+  }
+
+  return payload;
 }
 
 function pickConnectionString() {
@@ -663,7 +759,7 @@ var storage = createStorage({
 });
 
 app.get('/api/health', function (req, res) {
-  var proxyPort = Math.max(1, Number(process.env.YOUTUBE_PROXY_PORT || 5000) || 5000);
+  var proxyPort = getYouTubeProxyPort();
   var youtubeCommand = resolveYouTubeCommand();
   res.json({
     status: 'ok',
@@ -673,6 +769,7 @@ app.get('/api/health', function (req, res) {
     tvServerEnabled: ENABLE_TV_SERVER,
     youtubeProxyEnabled: process.env.ENABLE_YOUTUBE_PROXY !== '0',
     youtubeProxyPort: proxyPort,
+    youtubeHlsProxyEnabled: isPythonYouTubeHlsEnabled(),
     youtubeStreamRuntime: {
       ytDlp: youtubeCommand ? (youtubeCommand.label || youtubeCommand.command) : '',
       ffmpeg: FFMPEG_PATH,
@@ -2898,8 +2995,29 @@ async function deliverYouTubeIptvStream(req, res, item, routeLabel) {
     return;
   }
 
-  console.log('[YouTube][IPTV] proxy TS:', safeTrim(routeLabel) || 'stream', videoId);
-  await proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
+  var sourceMeta = item && item.sourceMeta && typeof item.sourceMeta === 'object' ? item.sourceMeta : {};
+  var sourceUrl = safeTrim(sourceMeta.originalUrl || item.url || item.sourceCmd || item.cmd) ||
+    ('https://www.youtube.com/watch?v=' + videoId);
+  var title = safeTrim(item && item.name);
+  var requestedExtension = requestItemExtension(req.params && req.params.id);
+
+  try {
+    if (requestedExtension === 'm3u8') {
+      await sendYouTubePythonHlsManifest(req, res, videoId, buildYouTubeProxyId(videoId), sourceUrl, title);
+      return;
+    }
+
+    await proxyYouTubePythonHlsAsTs(req, res, videoId, sourceUrl, title, routeLabel);
+  } catch (pythonError) {
+    console.warn('[YouTube][IPTV] python HLS failed:', videoId, pythonError && pythonError.message);
+    if (isManagedSinglePortHost(req)) {
+      if (!res.headersSent) {
+        res.status(503).send('YouTube stream could not be resolved');
+      }
+      return;
+    }
+    await proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
+  }
 }
 
 async function proxyCompatibleStream(req, res, targetUrl, baseHeaders, options) {
@@ -4691,10 +4809,10 @@ app.get('/api/youtube/resolve', async function (req, res) {
   return res.json({
     ok: true,
     streamUrl: buildRuntimeBaseUrl(req) + buildYouTubeProxyPath(videoId) + '?raw=1',
-    hlsUrl: null,
+    hlsUrl: buildRuntimeBaseUrl(req) + buildYouTubeProxyPath(videoId) + '?raw=1',
     videoId: videoId,
-    playerMode: 'mpegts',
-    isHls: false
+    playerMode: 'hls',
+    isHls: true
   });
 });
 
@@ -4761,7 +4879,22 @@ app.get('/api/yt', async function (req, res) {
   }
 
   console.log('[/api/yt] Cozumleniyor:', videoId);
-  return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
+  try {
+    return await proxyYouTubePythonHlsAsTs(
+      req,
+      res,
+      videoId,
+      'https://www.youtube.com/watch?v=' + videoId,
+      '',
+      '/api/yt'
+    );
+  } catch (pythonError) {
+    console.warn('[/api/yt] python HLS failed:', videoId, pythonError && pythonError.message);
+    if (isManagedSinglePortHost(req)) {
+      return res.status(503).send('YouTube stream could not be resolved');
+    }
+    return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
+  }
 });
 
 app.options('/api/stream', function (req, res) {
@@ -6251,7 +6384,24 @@ app.get('/api/yt-stream', async function(req, res) {
   if (!id) return res.status(400).json({ error: 'id parametresi gerekli' });
 
   res.set('Access-Control-Allow-Origin', '*');
-  return proxyYouTubeWithYtDlpFfmpeg(req, res, id);
+  var videoId = ytStream.extractVideoId(id);
+  if (!videoId) return res.status(400).json({ error: 'Gecersiz YouTube video ID' });
+  try {
+    return await proxyYouTubePythonHlsAsTs(
+      req,
+      res,
+      videoId,
+      'https://www.youtube.com/watch?v=' + videoId,
+      '',
+      '/api/yt-stream'
+    );
+  } catch (pythonError) {
+    console.warn('[/api/yt-stream] python HLS failed:', videoId, pythonError && pythonError.message);
+    if (isManagedSinglePortHost(req)) {
+      return res.status(503).send('YouTube stream could not be resolved');
+    }
+    return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
+  }
 });
 
 app.get('/api/yt-info', async function(req, res) {
@@ -6302,6 +6452,86 @@ function decodeProxySegmentParam(value) {
   } catch (error) {
     return '';
   }
+}
+
+function encodeProxySegmentParam(value) {
+  return Buffer.from(String(value || ''), 'utf8').toString('base64url');
+}
+
+function buildPythonHlsManifestUrl(channelId) {
+  return getYouTubeProxyBaseUrl() + '/hls/' + encodeURIComponent(channelId) + '/index.m3u8';
+}
+
+function buildYouTubeProxySegmentUrl(req, proxyId, targetUrl) {
+  return buildRuntimeBaseUrl(req) +
+    '/proxy/' +
+    encodeURIComponent(proxyId) +
+    '?u=' +
+    encodeURIComponent(encodeProxySegmentParam(targetUrl));
+}
+
+function rewriteYouTubeHlsManifestLine(line, manifestUrl, req, proxyId) {
+  var trimmed = String(line || '').trim();
+  if (!trimmed) {
+    return line;
+  }
+
+  if (trimmed.charAt(0) === '#') {
+    return line.replace(/URI="([^"]+)"/g, function (_match, uri) {
+      var resolvedUri = resolveRelativeUrl(manifestUrl, uri);
+      return 'URI="' + buildYouTubeProxySegmentUrl(req, proxyId, resolvedUri) + '"';
+    });
+  }
+
+  return buildYouTubeProxySegmentUrl(req, proxyId, resolveRelativeUrl(manifestUrl, trimmed));
+}
+
+function rewriteYouTubeHlsManifest(manifest, manifestUrl, req, proxyId) {
+  return String(manifest || '')
+    .split(/\r?\n/)
+    .map(function (line) {
+      return rewriteYouTubeHlsManifestLine(line, manifestUrl, req, proxyId);
+    })
+    .join('\n');
+}
+
+async function sendYouTubePythonHlsManifest(req, res, videoId, proxyId, sourceUrl, title) {
+  var channelId = buildYouTubeProxyId(videoId);
+  var routeId = safeTrim(proxyId) || channelId;
+  await ensurePythonYouTubeHls(videoId, sourceUrl, title);
+
+  var manifestUrl = buildPythonHlsManifestUrl(channelId);
+  var response = await fetch(manifestUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      Accept: 'application/vnd.apple.mpegurl,*/*'
+    },
+    timeout: 20000
+  });
+  var manifestText = await response.text();
+  console.log('[YouTube][HLS] manifest upstream:', response.status, safeTrim(response.headers.get('content-type')) || '(no content-type)', routeId);
+
+  if (!response.ok || manifestText.trim().indexOf('#EXTM3U') !== 0) {
+    throw new Error('Python YouTube HLS manifest hazir degil');
+  }
+
+  setCommonProxyHeaders(res);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+  res.status(200).send(rewriteYouTubeHlsManifest(manifestText, manifestUrl, req, routeId));
+}
+
+async function proxyYouTubePythonHlsAsTs(req, res, videoId, sourceUrl, title, routeLabel) {
+  var channelId = buildYouTubeProxyId(videoId);
+  await ensurePythonYouTubeHls(videoId, sourceUrl, title);
+  var manifestUrl = buildPythonHlsManifestUrl(channelId);
+  console.log('[YouTube][IPTV] python HLS -> TS:', safeTrim(routeLabel) || 'stream', videoId);
+  await proxyCompatibleStream(req, res, manifestUrl, {
+    'User-Agent': 'Mozilla/5.0',
+    Accept: '*/*'
+  }, {
+    probeOnly: false
+  });
 }
 
 function isBrowserDocumentRequest(req) {
@@ -6360,7 +6590,22 @@ async function handleYouTubeProxyRoute(req, res) {
     return res.redirect(302, playerUrl);
   }
 
-  return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
+  try {
+    return await sendYouTubePythonHlsManifest(
+      req,
+      res,
+      videoId,
+      req.params && req.params.id,
+      'https://www.youtube.com/watch?v=' + videoId,
+      'YouTube ' + videoId
+    );
+  } catch (pythonError) {
+    console.warn('[yt-proxy] python HLS failed:', videoId, pythonError && pythonError.message);
+    if (isManagedSinglePortHost(req)) {
+      return res.status(503).send('YouTube stream could not be resolved');
+    }
+    return proxyYouTubeWithYtDlpFfmpeg(req, res, videoId);
+  }
 }
 
 function normalizeYouTubeLiveTitle(title, videoId) {
