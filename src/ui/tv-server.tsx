@@ -3,15 +3,21 @@ import { createRoot } from 'react-dom/client'
 import { Shell } from './shared/shell'
 import { PlaylistRecord, ServerInfo, countData, deployVercel, getPlaylists, getServerInfo, saveServerConfig } from './shared/api'
 
+function shouldUseSeparatePort(info: ServerInfo) {
+  const host = window.location.hostname.toLowerCase()
+  const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host.endsWith('.local')
+  return Boolean(info.separatePort && info.port && isLocal)
+}
+
 function buildM3uLink(info: ServerInfo) {
-  const base = info.separatePort && info.port
+  const base = shouldUseSeparatePort(info)
     ? (window.location.protocol + '//' + window.location.hostname + ':' + String(info.port))
     : window.location.origin
   return base + '/playlist-latest.m3u?username=' + encodeURIComponent(info.username) + '&password=' + encodeURIComponent(info.password)
 }
 
 function buildDirectM3uLink(info: ServerInfo) {
-  const base = info.separatePort && info.port
+  const base = shouldUseSeparatePort(info)
     ? (window.location.protocol + '//' + window.location.hostname + ':' + String(info.port))
     : window.location.origin
   return base + '/playlist.m3u?username=' + encodeURIComponent(info.username) + '&password=' + encodeURIComponent(info.password)

@@ -78,6 +78,12 @@ function ytChannelLabel(channel: YtChannel): string {
   return channel.title || channel.name || channel.url || channel.videoId || channel.id || 'YouTube kanal';
 }
 
+function shouldUseSeparatePort(info: ServerInfo | null): boolean {
+  if (!info?.separatePort || !info.port || typeof window === 'undefined') return false;
+  const host = window.location.hostname.toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host.endsWith('.local');
+}
+
 function StatCard({ label, value, sub, color }: { label: string; value: string | number; sub?: string; color?: string }) {
   return (
     <div style={{
@@ -197,7 +203,7 @@ export default function DashboardPage() {
   // Build connection URLs
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const isVercel = info ? !info.canTriggerLocalDeploy : false;
-  const xtreamBase = info?.separatePort
+  const xtreamBase = shouldUseSeparatePort(info)
     ? origin.replace(/:\d+$/, '') + ':' + info.port
     : origin;
   const m3uUrl = info

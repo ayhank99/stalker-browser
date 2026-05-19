@@ -1234,7 +1234,9 @@ export function showPrompt(message, defaultValue) {
 
 export function buildTvBaseUrl(info) {
   if (!info) return ''
-  if (info.separatePort === false) return window.location.origin
+  const host = window.location.hostname.toLowerCase()
+  const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host.endsWith('.local')
+  if (info.separatePort === false || !isLocal) return window.location.origin
   return window.location.protocol + '//' + window.location.hostname + ':' + info.port
 }
 

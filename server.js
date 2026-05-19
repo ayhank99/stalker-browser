@@ -21,6 +21,7 @@ var createStorage = require('./storage').createStorage;
 var ytStream = require('./lib/yt-stream');
 
 var app = express();
+app.set('trust proxy', true);
 var PORT = Number(process.env.PORT || 3000);
 var XTREAM_PORT = Number(process.env.XTREAM_PORT || 8080);
 var DATA_DIR = process.env.DATA_DIR
@@ -45,6 +46,56 @@ var APP_READONLY = process.env.APP_READONLY === '1';
 var FORCE_FILE_STORAGE = process.env.STORAGE_MODE === 'file' || process.env.FORCE_FILE_STORAGE === '1';
 var youtubeCommandCache = undefined;
 var youtubeProxyPythonCache = undefined;
+
+function isManagedSinglePortHost(req) {
+  var host = '';
+  try {
+    host = firstHeaderValue(req && req.headers && (req.headers['x-forwarded-host'] || req.headers.host));
+  } catch (error) {
+    host = '';
+  }
+  host = String(host || '').toLowerCase().split(':')[0];
+
+  return !!(
+    process.env.RAILWAY_ENVIRONMENT ||
+    process.env.RAILWAY_STATIC_URL ||
+    process.env.RAILWAY_SERVICE_ID ||
+    process.env.RENDER ||
+    process.env.HEROKU_APP_NAME ||
+    process.env.FLY_APP_NAME ||
+    process.env.VERCEL ||
+    host.endsWith('.railway.app') ||
+    host.endsWith('.up.railway.app') ||
+    host.endsWith('.onrender.com') ||
+    host.endsWith('.vercel.app') ||
+    host.endsWith('.fly.dev')
+  );
+}
+
+function shouldAdvertiseSeparateTvPort(req) {
+  if (!ENABLE_TV_SERVER || XTREAM_PORT === PORT) {
+    return false;
+  }
+  if (process.env.ALLOW_PUBLIC_TV_PORT === '1') {
+    return true;
+  }
+  return !isManagedSinglePortHost(req);
+}
+
+function getAdvertisedTvPort(req) {
+  if (shouldAdvertiseSeparateTvPort(req)) {
+    return XTREAM_PORT;
+  }
+  try {
+    var parsed = new URL(buildRuntimeBaseUrl(req));
+    if (parsed.port) {
+      return Number(parsed.port);
+    }
+    return parsed.protocol === 'https:' ? 443 : 80;
+  } catch (error) {
+    return PORT;
+  }
+}
 
 function uniqueValues(values) {
   var seen = {};
@@ -5819,9 +5870,9 @@ xtreamApp.get('/player_api.php', async function (req, res) {
     },
     server_info: {
       url: req.hostname,
-      port: ENABLE_TV_SERVER ? String(XTREAM_PORT) : '',
-      https_port: ENABLE_TV_SERVER ? String(XTREAM_PORT) : '',
-      server_protocol: req.protocol,
+      port: ENABLE_TV_SERVER ? String(getAdvertisedTvPort(req)) : '',
+      https_port: ENABLE_TV_SERVER ? String(getAdvertisedTvPort(req)) : '',
+      server_protocol: firstHeaderValue(req.headers && req.headers['x-forwarded-proto']) || req.protocol,
       rtmp_port: '8935',
       timezone: 'Europe/Istanbul',
       timestamp_now: Math.floor(Date.now() / 1000),
@@ -6082,12 +6133,13 @@ app.get('/api/server-info', function (req, res) {
       var lists = results[1] || [];
       var explicitPublishedLists = (lists || []).filter(isPlaylistPublishedToTv);
       var publishedLists = explicitPublishedLists.length ? explicitPublishedLists : lists;
+      var separatePort = shouldAdvertiseSeparateTvPort(req);
 
       res.json({
         enabled: true,
-        separatePort: ENABLE_TV_SERVER,
+        separatePort: separatePort,
         deliveryMode: TV_DELIVERY_MODE,
-        port: XTREAM_PORT,
+        port: separatePort ? XTREAM_PORT : getAdvertisedTvPort(req),
         username: config.username,
         password: config.password,
         storage: storage.isDatabase ? 'database' : 'file',
@@ -6143,7 +6195,7 @@ app.post('/api/server-config', async function (req, res) {
     res.json({
       ok: true,
       enabled: true,
-      separatePort: ENABLE_TV_SERVER,
+      separatePort: shouldAdvertiseSeparateTvPort(req),
       deliveryMode: TV_DELIVERY_MODE,
       username: nextConfig.username,
       password: nextConfig.password

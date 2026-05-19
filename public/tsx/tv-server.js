@@ -21808,12 +21808,17 @@ async function deployVercel() {
 
 // src/ui/tv-server.tsx
 var import_jsx_runtime2 = __toESM(require_jsx_runtime());
+function shouldUseSeparatePort(info) {
+  const host = window.location.hostname.toLowerCase();
+  const isLocal = host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host.endsWith(".local");
+  return Boolean(info.separatePort && info.port && isLocal);
+}
 function buildM3uLink(info) {
-  const base = info.separatePort && info.port ? window.location.protocol + "//" + window.location.hostname + ":" + String(info.port) : window.location.origin;
+  const base = shouldUseSeparatePort(info) ? window.location.protocol + "//" + window.location.hostname + ":" + String(info.port) : window.location.origin;
   return base + "/playlist-latest.m3u?username=" + encodeURIComponent(info.username) + "&password=" + encodeURIComponent(info.password);
 }
 function buildDirectM3uLink(info) {
-  const base = info.separatePort && info.port ? window.location.protocol + "//" + window.location.hostname + ":" + String(info.port) : window.location.origin;
+  const base = shouldUseSeparatePort(info) ? window.location.protocol + "//" + window.location.hostname + ":" + String(info.port) : window.location.origin;
   return base + "/playlist.m3u?username=" + encodeURIComponent(info.username) + "&password=" + encodeURIComponent(info.password);
 }
 function TvServerApp() {
